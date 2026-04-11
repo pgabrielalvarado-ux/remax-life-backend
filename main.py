@@ -284,7 +284,6 @@ def build_html(properties: List[PropertyData], req: PropertyRequest) -> str:
               <div class="prop-price">{p.price}</div>
               <div class="prop-location">📍 {p.location}</div>
               <p class="prop-desc">{p.description[:300]}</p>
-              <a class="prop-link" href="{p.source_url}">{"Ver en Encuentra24 →" if lang else "View on Encuentra24 →"}</a>
             </div>
             <div class="prop-right">
               <div class="spec-card"><span class="spec-val">{p.area}</span><span class="spec-lbl">{"Área" if lang else "Area"}</span></div>
@@ -343,7 +342,7 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
 .prop-price{{font-family:'Montserrat',sans-serif;font-size:21px;font-weight:700;color:#003DA5;margin-bottom:4px;}}
 .prop-location{{font-size:12px;color:#888;margin-bottom:10px;}}
 .prop-desc{{font-size:12.5px;color:#444;line-height:1.7;margin-bottom:10px;}}
-.prop-link{{display:none;}}
+
 .spec-card{{background:#F0F4FF;border-radius:8px;padding:10px 8px;text-align:center;}}
 .spec-val{{display:block;font-family:'Montserrat',sans-serif;font-size:14px;font-weight:700;color:#001F5B;}}
 .spec-lbl{{display:block;font-size:9px;color:#888;margin-top:2px;text-transform:uppercase;letter-spacing:0.06em;}}

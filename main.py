@@ -280,6 +280,15 @@ def build_html(properties: List[PropertyData], req: PropertyRequest) -> str:
             </div>
           </div>
 
+          <div class="prop-info">
+            <h2 class="prop-title">{p.name}</h2>
+            <div class="prop-price-row">
+              <span class="prop-price">{p.price}</span>
+              <span class="prop-location">📍 {p.location}</span>
+            </div>
+            <p class="prop-desc">{p.description[:400]}</p>
+          </div>
+
           <div class="specs-row">
             <div class="spec-item">
               <span class="spec-icon">📐</span>
@@ -300,15 +309,6 @@ def build_html(properties: List[PropertyData], req: PropertyRequest) -> str:
               <span class="spec-icon">🚗</span>
               <div><span class="spec-val">{p.parking}</span><span class="spec-lbl">{"Estacionamiento" if lang else "Parking"}</span></div>
             </div>
-          </div>
-
-          <div class="prop-info">
-            <h2 class="prop-title">{p.name}</h2>
-            <div class="prop-price-row">
-              <span class="prop-price">{p.price}</span>
-              <span class="prop-location">📍 {p.location}</span>
-            </div>
-            <p class="prop-desc">{p.description[:400]}</p>
           </div>
 
           <footer class="prop-footer">
@@ -357,7 +357,7 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
 .placeholder{{background:#E8EEF5;display:flex;align-items:center;justify-content:center;width:100%;height:100%;}}
 .placeholder span{{font-size:11px;color:#aaa;}}
 
-/* ── Specs row (horizontal, below gallery) ── */
+/* ── Specs row (above footer) ── */
 .specs-row{{display:flex;align-items:center;gap:0;padding:0 24px;background:#F4F7FF;border-top:2px solid #003DA5;border-bottom:1px solid #DDE5F5;height:68px;flex-shrink:0;}}
 .spec-item{{display:flex;align-items:center;gap:10px;flex:1;padding:0 16px;}}
 .spec-icon{{font-size:18px;}}
@@ -367,6 +367,7 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
 
 /* ── Property info (below specs) ── */
 .prop-info{{flex:1;padding:16px 28px 12px;display:flex;flex-direction:column;gap:8px;overflow:hidden;}}
+.prop-desc{{font-size:12.5px;color:#444;line-height:1.75;overflow:hidden;text-align:justify;}}
 .prop-title{{font-family:'Montserrat',sans-serif;font-size:18px;font-weight:900;color:#001F5B;line-height:1.3;}}
 .prop-price-row{{display:flex;align-items:baseline;gap:20px;}}
 .prop-price{{font-family:'Montserrat',sans-serif;font-size:22px;font-weight:700;color:#003DA5;}}
@@ -393,11 +394,11 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
 <!-- COVER -->
 <div class="page cover">
   <div class="cover-top">
-    <div class="cover-logo"><img src="{LOGO_DATA_URI}" style="height:64px;background:#fff;border-radius:8px;padding:8px 18px;" alt="RE/MAX Life" /></div>
+    <div class="cover-logo"><img src="{LOGO_DATA_URI}" style="height:90px;background:#fff;border-radius:10px;padding:10px 24px;" alt="RE/MAX Life" /></div>
     <p class="cover-tagline">{"Oportunidades únicas en los destinos más rentables de Panamá" if lang else "Unique real estate opportunities in Panama's most profitable destinations"}</p>
   </div>
   <div class="cover-bottom">
-    <div style="margin-bottom:22px;">{LOGO_IMG_LIGHT}</div>
+    <div style="margin-bottom:22px;"><img src="{LOGO_DATA_URI}" style="height:100px;" alt="RE/MAX Life" /></div>
     <div class="cover-label">{"Selección exclusiva" if lang else "Exclusive selection"}</div>
     <div class="cover-title">{"Propiedades\nseleccionadas" if lang else "Selected\nproperties"}</div>
     <div class="cover-label">{"Preparado para" if lang else "Prepared for"}</div>

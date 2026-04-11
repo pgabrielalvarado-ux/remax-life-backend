@@ -13,6 +13,17 @@ from datetime import datetime
 
 app = FastAPI(title="RE/MAX Life - Property PDF Generator")
 
+# Embed RE/MAX Life logo as base64 once at startup
+import os as _os
+_LOGO_B64 = ""
+_LOGO_PATH = _os.path.join(_os.path.dirname(__file__), "remax-life-logo.png")
+if _os.path.exists(_LOGO_PATH):
+    with open(_LOGO_PATH, "rb") as _f:
+        _LOGO_B64 = f"data:image/png;base64,{base64.b64encode(_f.read()).decode()}"
+LOGO_IMG_DARK = f'<img src="{_LOGO_B64}" style="height:36px;background:#fff;border-radius:6px;padding:4px 10px;" alt="RE/MAX Life" />' if _LOGO_B64 else '<span style="color:#fff;font-weight:900;font-size:18px;">RE/MAX LIFE</span>'
+LOGO_IMG_LIGHT = f'<img src="{_LOGO_B64}" style="height:52px;" alt="RE/MAX Life" />' if _LOGO_B64 else '<span style="font-weight:900;font-size:22px;color:#001F5B;">RE/MAX LIFE</span>'
+LOGO_IMG_HEADER_SM = f'<img src="{_LOGO_B64}" style="height:26px;background:#fff;border-radius:4px;padding:3px 8px;" alt="RE/MAX Life" />' if _LOGO_B64 else '<span style="color:#fff;font-weight:900;font-size:13px;">RE/MAX LIFE</span>'
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -260,13 +271,7 @@ def build_html(properties: List[PropertyData], req: PropertyRequest) -> str:
         prop_pages += f"""
         <div class="page prop-page">
           <header class="prop-header">
-            <div class="logo-small">
-              <div class="logo-mark">★</div>
-              <div class="logo-text-sm">
-                <span class="re-sm">RE</span><span class="max-sm">/MAX</span>
-                <span class="life-sm">LIFE</span>
-              </div>
-            </div>
+            {LOGO_IMG_HEADER_SM}
             <div class="prop-num">{"Propiedad" if lang else "Property"} {i+1} / {len(properties)}</div>
           </header>
 
@@ -309,18 +314,15 @@ def build_html(properties: List[PropertyData], req: PropertyRequest) -> str:
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;900&family=Inter:wght@400;500&display=swap');
 *{{box-sizing:border-box;margin:0;padding:0;}}
+html,body{{margin:0;padding:0;}}
 body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
-.page{{width:210mm;min-height:297mm;page-break-after:always;position:relative;display:flex;flex-direction:column;overflow:hidden;}}
-@media print{{.page{{page-break-after:always;}} .no-print{{display:none!important;}}}}
+.page{{width:210mm;height:297mm;page-break-after:always;page-break-inside:avoid;position:relative;display:flex;flex-direction:column;overflow:hidden;}}
+@media print{{html,body{{margin:0;padding:0;}} .page{{margin:0;page-break-after:always;page-break-inside:avoid;}} .no-print{{display:none!important;}}}}
 
 /* ── Cover ── */
 .cover{{background:#001F5B;color:#fff;}}
 .cover-top{{background:linear-gradient(160deg,#001233 0%,#003DA5 100%);flex:1;display:flex;flex-direction:column;justify-content:flex-end;padding:48px;}}
-.cover-logo{{display:flex;align-items:center;gap:14px;margin-bottom:40px;}}
-.logo-mark-lg{{width:60px;height:60px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;font-size:26px;color:#003DA5;font-weight:900;}}
-.logo-text-lg .re{{font-family:'Montserrat',sans-serif;font-size:34px;font-weight:900;color:#fff;}}
-.logo-text-lg .max{{font-family:'Montserrat',sans-serif;font-size:34px;font-weight:900;color:#E8002D;}}
-.logo-text-lg .life{{display:block;font-family:'Montserrat',sans-serif;font-size:13px;font-weight:700;letter-spacing:4px;color:rgba(255,255,255,0.7);}}
+.cover-logo{{margin-bottom:40px;}}
 .cover-tagline{{font-size:15px;color:rgba(255,255,255,0.65);max-width:300px;line-height:1.7;}}
 .cover-bottom{{background:#fff;padding:44px 48px;}}
 .cover-label{{font-size:11px;font-weight:600;letter-spacing:0.15em;color:#999;text-transform:uppercase;margin-bottom:8px;}}
@@ -330,12 +332,7 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
 .cover-badge{{display:inline-block;background:#003DA5;color:#fff;padding:10px 22px;border-radius:4px;font-size:13px;font-weight:600;margin-top:16px;}}
 
 /* ── Prop pages ── */
-.prop-header{{background:#003DA5;padding:12px 32px;display:flex;align-items:center;justify-content:space-between;}}
-.logo-small{{display:flex;align-items:center;gap:8px;}}
-.logo-mark{{width:28px;height:28px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;color:#003DA5;font-weight:900;}}
-.logo-text-sm .re-sm{{font-family:'Montserrat',sans-serif;font-size:15px;font-weight:900;color:#fff;}}
-.logo-text-sm .max-sm{{font-family:'Montserrat',sans-serif;font-size:15px;font-weight:900;color:#E8002D;}}
-.logo-text-sm .life-sm{{font-family:'Montserrat',sans-serif;font-size:8px;font-weight:700;letter-spacing:2px;color:rgba(255,255,255,0.75);display:block;}}
+.prop-header{{background:#003DA5;padding:10px 32px;display:flex;align-items:center;justify-content:space-between;}}
 .prop-num{{font-size:12px;color:rgba(255,255,255,0.7);font-weight:500;}}
 
 .gallery{{display:flex;gap:4px;padding:18px 28px 0;height:195px;}}
@@ -352,7 +349,7 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
 .prop-price{{font-family:'Montserrat',sans-serif;font-size:21px;font-weight:700;color:#003DA5;margin-bottom:4px;}}
 .prop-location{{font-size:12px;color:#888;margin-bottom:10px;}}
 .prop-desc{{font-size:12.5px;color:#444;line-height:1.7;margin-bottom:10px;}}
-.prop-link{{font-size:11px;color:#003DA5;text-decoration:none;}}
+.prop-link{{display:none;}}
 .spec-card{{background:#F0F4FF;border-radius:8px;padding:10px 8px;text-align:center;}}
 .spec-val{{display:block;font-family:'Montserrat',sans-serif;font-size:14px;font-weight:700;color:#001F5B;}}
 .spec-lbl{{display:block;font-size:9px;color:#888;margin-top:2px;text-transform:uppercase;letter-spacing:0.06em;}}
@@ -375,16 +372,11 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
 <!-- COVER -->
 <div class="page cover">
   <div class="cover-top">
-    <div class="cover-logo">
-      <div class="logo-mark-lg">★</div>
-      <div class="logo-text-lg">
-        <span class="re">RE</span><span class="max">/MAX</span>
-        <span class="life">LIFE</span>
-      </div>
-    </div>
+    <div class="cover-logo">{LOGO_IMG_DARK}</div>
     <p class="cover-tagline">{"Oportunidades únicas en los destinos más rentables de Panamá" if lang else "Unique real estate opportunities in Panama's most profitable destinations"}</p>
   </div>
   <div class="cover-bottom">
+    <div style="margin-bottom:20px;">{LOGO_IMG_LIGHT}</div>
     <div class="cover-label">{"Selección exclusiva" if lang else "Exclusive selection"}</div>
     <div class="cover-title">{"Propiedades\nseleccionadas" if lang else "Selected\nproperties"}</div>
     <div class="cover-label">{"Preparado para" if lang else "Prepared for"}</div>

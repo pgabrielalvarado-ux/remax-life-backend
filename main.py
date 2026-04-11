@@ -254,10 +254,10 @@ def build_html(properties: List[PropertyData], req: PropertyRequest) -> str:
     lang = req.language == "es"
     date_str = format_date(req.doc_date or datetime.now().strftime("%Y-%m-%d"), req.language)
 
-    def img_tag(src, cls=""):
+    def img_tag(src, cls="", style=""):
         if src:
-            return f'<img src="{src}" class="{cls}" alt="property photo" />'
-        return f'<div class="{cls} placeholder"><span>{"Foto" if lang else "Photo"}</span></div>'
+            return f'<img src="{src}" class="{cls}" style="{style}" alt="property photo" />'
+        return f'<div class="{cls} placeholder" style="{style}"><span>{"Foto" if lang else "Photo"}</span></div>'
 
     prop_pages = ""
     for i, p in enumerate(properties):
@@ -271,26 +271,42 @@ def build_html(properties: List[PropertyData], req: PropertyRequest) -> str:
 
           <div class="gallery">
             <div class="gallery-main">{img_tag(imgs[0], "main-img")}</div>
-            <div class="gallery-grid">
-              {img_tag(imgs[1], "thumb-img")}
-              {img_tag(imgs[2], "thumb-img")}
-              {img_tag(imgs[3], "thumb-img")}
+            <div class="gallery-side">
+              {img_tag(imgs[1], "side-img")}
+              {img_tag(imgs[2], "side-img")}
+              {img_tag(imgs[3], "side-img")}
             </div>
           </div>
 
-          <div class="prop-body">
-            <div class="prop-left">
-              <h2 class="prop-title">{p.name}</h2>
-              <div class="prop-price">{p.price}</div>
-              <div class="prop-location">📍 {p.location}</div>
-              <p class="prop-desc">{p.description[:300]}</p>
+          <div class="specs-row">
+            <div class="spec-item">
+              <span class="spec-icon">📐</span>
+              <div><span class="spec-val">{p.area}</span><span class="spec-lbl">{"Área" if lang else "Area"}</span></div>
             </div>
-            <div class="prop-right">
-              <div class="spec-card"><span class="spec-val">{p.area}</span><span class="spec-lbl">{"Área" if lang else "Area"}</span></div>
-              <div class="spec-card"><span class="spec-val">{p.bedrooms}</span><span class="spec-lbl">{"Recámaras" if lang else "Bedrooms"}</span></div>
-              <div class="spec-card"><span class="spec-val">{p.bathrooms}</span><span class="spec-lbl">{"Baños" if lang else "Bathrooms"}</span></div>
-              <div class="spec-card"><span class="spec-val">{p.parking}</span><span class="spec-lbl">{"Estac." if lang else "Parking"}</span></div>
+            <div class="spec-divider"></div>
+            <div class="spec-item">
+              <span class="spec-icon">🛏</span>
+              <div><span class="spec-val">{p.bedrooms}</span><span class="spec-lbl">{"Recámaras" if lang else "Bedrooms"}</span></div>
             </div>
+            <div class="spec-divider"></div>
+            <div class="spec-item">
+              <span class="spec-icon">🚿</span>
+              <div><span class="spec-val">{p.bathrooms}</span><span class="spec-lbl">{"Baños" if lang else "Bathrooms"}</span></div>
+            </div>
+            <div class="spec-divider"></div>
+            <div class="spec-item">
+              <span class="spec-icon">🚗</span>
+              <div><span class="spec-val">{p.parking}</span><span class="spec-lbl">{"Estacionamiento" if lang else "Parking"}</span></div>
+            </div>
+          </div>
+
+          <div class="prop-info">
+            <h2 class="prop-title">{p.name}</h2>
+            <div class="prop-price-row">
+              <span class="prop-price">{p.price}</span>
+              <span class="prop-location">📍 {p.location}</span>
+            </div>
+            <p class="prop-desc">{p.description[:400]}</p>
           </div>
 
           <footer class="prop-footer">
@@ -306,57 +322,66 @@ def build_html(properties: List[PropertyData], req: PropertyRequest) -> str:
 <meta charset="UTF-8">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;900&family=Inter:wght@400;500&display=swap');
+@page {{size: 8.5in 11in; margin: 0;}}
 *{{box-sizing:border-box;margin:0;padding:0;}}
 html,body{{margin:0;padding:0;}}
 body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
-.page{{width:210mm;height:297mm;page-break-after:always;page-break-inside:avoid;position:relative;display:flex;flex-direction:column;overflow:hidden;}}
-@media print{{html,body{{margin:0;padding:0;}} .page{{margin:0;page-break-after:always;page-break-inside:avoid;}} .no-print{{display:none!important;}}}}
+.page{{width:8.5in;height:11in;page-break-after:always;page-break-inside:avoid;position:relative;display:flex;flex-direction:column;overflow:hidden;}}
+@media print{{html,body{{margin:0;padding:0;}} .page{{margin:0;}} .no-print{{display:none!important;}}}}
 
 /* ── Cover ── */
 .cover{{background:#001F5B;color:#fff;}}
-.cover-top{{background:linear-gradient(160deg,#001233 0%,#003DA5 100%);flex:1;display:flex;flex-direction:column;justify-content:flex-end;padding:48px;}}
-.cover-logo{{margin-bottom:40px;}}
-.cover-tagline{{font-size:15px;color:rgba(255,255,255,0.65);max-width:300px;line-height:1.7;}}
-.cover-bottom{{background:#fff;padding:44px 48px;}}
+.cover-top{{background:linear-gradient(160deg,#001233 0%,#003DA5 100%);flex:1;display:flex;flex-direction:column;justify-content:flex-end;padding:52px;}}
+.cover-logo{{margin-bottom:44px;}}
+.cover-tagline{{font-size:15px;color:rgba(255,255,255,0.65);max-width:340px;line-height:1.75;}}
+.cover-bottom{{background:#fff;padding:48px 52px;}}
 .cover-label{{font-size:11px;font-weight:600;letter-spacing:0.15em;color:#999;text-transform:uppercase;margin-bottom:8px;}}
-.cover-title{{font-family:'Montserrat',sans-serif;font-size:40px;font-weight:900;color:#001F5B;line-height:1.1;margin-bottom:20px;}}
-.cover-client{{font-size:18px;font-weight:600;color:#003DA5;margin-bottom:4px;}}
+.cover-title{{font-family:'Montserrat',sans-serif;font-size:42px;font-weight:900;color:#001F5B;line-height:1.1;margin-bottom:22px;white-space:pre-line;}}
+.cover-client{{font-size:19px;font-weight:600;color:#003DA5;margin-bottom:4px;}}
 .cover-meta{{font-size:13px;color:#888;margin-top:20px;}}
-.cover-badge{{display:inline-block;background:#003DA5;color:#fff;padding:10px 22px;border-radius:4px;font-size:13px;font-weight:600;margin-top:16px;}}
+.cover-badge{{display:inline-block;background:#003DA5;color:#fff;padding:11px 24px;border-radius:4px;font-size:13px;font-weight:600;margin-top:16px;}}
 
-/* ── Prop pages ── */
-.prop-header{{background:#003DA5;padding:10px 32px;display:flex;align-items:center;justify-content:space-between;}}
-.prop-num{{font-size:12px;color:rgba(255,255,255,0.7);font-weight:500;}}
+/* ── Prop header ── */
+.prop-header{{background:#003DA5;padding:10px 28px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}}
+.prop-num{{font-size:12px;color:rgba(255,255,255,0.75);font-weight:500;}}
 
-.gallery{{display:flex;gap:4px;padding:18px 28px 0;height:195px;}}
-.gallery-main{{flex:2;}}
-.gallery-grid{{flex:1;display:flex;flex-direction:column;gap:4px;}}
-.main-img,.thumb-img{{width:100%;height:100%;object-fit:cover;border-radius:6px;display:block;}}
-.placeholder{{background:#E8EEF5;border-radius:6px;display:flex;align-items:center;justify-content:center;}}
+/* ── Gallery: main image + 3 stacked on right ── */
+.gallery{{display:flex;gap:5px;padding:16px 24px 0;height:390px;flex-shrink:0;}}
+.gallery-main{{flex:3;min-width:0;}}
+.gallery-side{{flex:1.4;display:flex;flex-direction:column;gap:5px;min-width:0;}}
+.main-img{{width:100%;height:100%;object-fit:cover;border-radius:8px;display:block;}}
+.side-img{{width:100%;flex:1;object-fit:cover;border-radius:6px;display:block;}}
+.placeholder{{background:#E8EEF5;border-radius:8px;display:flex;align-items:center;justify-content:center;width:100%;height:100%;}}
 .placeholder span{{font-size:11px;color:#aaa;}}
 
-.prop-body{{display:flex;gap:20px;padding:18px 28px;flex:1;}}
-.prop-left{{flex:2;}}
-.prop-right{{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:8px;align-content:start;padding-top:4px;}}
-.prop-title{{font-family:'Montserrat',sans-serif;font-size:19px;font-weight:900;color:#001F5B;margin-bottom:5px;line-height:1.2;}}
-.prop-price{{font-family:'Montserrat',sans-serif;font-size:21px;font-weight:700;color:#003DA5;margin-bottom:4px;}}
-.prop-location{{font-size:12px;color:#888;margin-bottom:10px;}}
-.prop-desc{{font-size:12.5px;color:#444;line-height:1.7;margin-bottom:10px;}}
+/* ── Specs row (horizontal, below gallery) ── */
+.specs-row{{display:flex;align-items:center;gap:0;padding:0 24px;background:#F4F7FF;border-top:2px solid #003DA5;border-bottom:1px solid #DDE5F5;height:68px;flex-shrink:0;}}
+.spec-item{{display:flex;align-items:center;gap:10px;flex:1;padding:0 16px;}}
+.spec-icon{{font-size:18px;}}
+.spec-val{{display:block;font-family:'Montserrat',sans-serif;font-size:15px;font-weight:700;color:#001F5B;line-height:1;}}
+.spec-lbl{{display:block;font-size:9px;color:#888;margin-top:2px;text-transform:uppercase;letter-spacing:0.07em;}}
+.spec-divider{{width:1px;height:36px;background:#D0DAF0;flex-shrink:0;}}
 
-.spec-card{{background:#F0F4FF;border-radius:8px;padding:10px 8px;text-align:center;}}
-.spec-val{{display:block;font-family:'Montserrat',sans-serif;font-size:14px;font-weight:700;color:#001F5B;}}
-.spec-lbl{{display:block;font-size:9px;color:#888;margin-top:2px;text-transform:uppercase;letter-spacing:0.06em;}}
-.prop-footer{{background:#F7F9FF;border-top:1px solid #E0E8F8;padding:10px 28px;display:flex;justify-content:space-between;font-size:11px;color:#666;}}
+/* ── Property info (below specs) ── */
+.prop-info{{flex:1;padding:16px 28px 12px;display:flex;flex-direction:column;gap:8px;overflow:hidden;}}
+.prop-title{{font-family:'Montserrat',sans-serif;font-size:18px;font-weight:900;color:#001F5B;line-height:1.3;}}
+.prop-price-row{{display:flex;align-items:baseline;gap:20px;}}
+.prop-price{{font-family:'Montserrat',sans-serif;font-size:22px;font-weight:700;color:#003DA5;}}
+.prop-location{{font-size:12px;color:#888;}}
+.prop-desc{{font-size:12.5px;color:#444;line-height:1.75;overflow:hidden;}}
+
+/* ── Footer ── */
+.prop-footer{{background:#F7F9FF;border-top:1px solid #E0E8F8;padding:10px 28px;display:flex;justify-content:space-between;font-size:11px;color:#666;flex-shrink:0;}}
 
 /* ── Back cover ── */
 .back{{background:#001233;color:#fff;align-items:center;justify-content:center;text-align:center;}}
-.back-quote{{font-family:'Montserrat',sans-serif;font-size:30px;font-weight:900;line-height:1.25;max-width:340px;margin:0 auto 16px;}}
-.back-cta{{font-size:17px;color:rgba(255,255,255,0.6);margin-bottom:44px;}}
-.back-contact{{border:1px solid rgba(255,255,255,0.15);border-radius:10px;padding:24px 48px;}}
-.back-contact p{{font-size:17px;font-weight:600;margin-bottom:6px;}}
+.back-quote{{font-family:'Montserrat',sans-serif;font-size:32px;font-weight:900;line-height:1.25;max-width:360px;margin:0 auto 16px;}}
+.back-cta{{font-size:18px;color:rgba(255,255,255,0.6);margin-bottom:48px;}}
+.back-contact{{border:1px solid rgba(255,255,255,0.15);border-radius:12px;padding:28px 52px;}}
+.back-contact p{{font-size:18px;font-weight:600;margin-bottom:8px;}}
 .back-contact span{{font-size:14px;color:rgba(255,255,255,0.6);}}
 
-/* ── Print btn ── */
+/* ── Print button ── */
 .print-btn{{position:fixed;bottom:24px;right:24px;background:#003DA5;color:#fff;border:none;border-radius:8px;padding:13px 26px;font-size:15px;font-weight:600;cursor:pointer;z-index:999;box-shadow:0 4px 20px rgba(0,61,165,0.4);}}
 </style>
 </head>
@@ -369,7 +394,7 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
     <p class="cover-tagline">{"Oportunidades únicas en los destinos más rentables de Panamá" if lang else "Unique real estate opportunities in Panama's most profitable destinations"}</p>
   </div>
   <div class="cover-bottom">
-    <div style="margin-bottom:20px;">{LOGO_IMG_LIGHT}</div>
+    <div style="margin-bottom:22px;">{LOGO_IMG_LIGHT}</div>
     <div class="cover-label">{"Selección exclusiva" if lang else "Exclusive selection"}</div>
     <div class="cover-title">{"Propiedades\nseleccionadas" if lang else "Selected\nproperties"}</div>
     <div class="cover-label">{"Preparado para" if lang else "Prepared for"}</div>

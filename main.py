@@ -40,6 +40,8 @@ class PropertyRequest(BaseModel):
     urls: List[str]
     client_name: str
     agent_name: str
+    agent_phone: str = "+507 391-9865"
+    agent_email: str = "Info@remax-life.com.pa"
     language: str = "es"
     doc_date: Optional[str] = None
 
@@ -315,7 +317,7 @@ def build_html(properties: List[PropertyData], req: PropertyRequest) -> str:
 
           <footer class="prop-footer">
             <span>{req.agent_name} · RE/MAX Life</span>
-            <span>+507 391-9865/662 · Info@remax-life.com.pa</span>
+            <span>{req.agent_phone} · {req.agent_email}</span>
           </footer>
         </div>
         """
@@ -406,7 +408,7 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
     <div class="cover-title">{"Propiedades\nseleccionadas" if lang else "Selected\nproperties"}</div>
     <div class="cover-label">{"Preparado para" if lang else "Prepared for"}</div>
     <div class="cover-client">{req.client_name}</div>
-    <div class="cover-badge">+507 391-9865/662 · Info@remax-life.com.pa</div>
+    <div class="cover-badge">{req.agent_phone} · {req.agent_email}</div>
     <div class="cover-meta">{"Presentado por" if lang else "Presented by"}: {req.agent_name} &nbsp;·&nbsp; {date_str}</div>
   </div>
 </div>
@@ -418,8 +420,8 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
   <div class="back-quote">Every great move begins with a conversation.</div>
   <div class="back-cta">Let's talk.</div>
   <div class="back-contact">
-    <p>+507 391-9865/662</p>
-    <span>Info@remax-life.com.pa</span>
+    <p>{req.agent_phone}</p>
+    <span>{req.agent_email}</span>
   </div>
 </div>
 

@@ -280,34 +280,36 @@ def build_html(properties: List[PropertyData], req: PropertyRequest) -> str:
             </div>
           </div>
 
-          <div class="prop-info">
-            <h2 class="prop-title">{p.name}</h2>
-            <div class="prop-price-row">
-              <span class="prop-price">{p.price}</span>
-              <span class="prop-location">📍 {p.location}</span>
+          <div class="content-area">
+            <div class="prop-info">
+              <h2 class="prop-title">{p.name}</h2>
+              <div class="prop-price-row">
+                <span class="prop-price">{p.price}</span>
+                <span class="prop-location">📍 {p.location}</span>
+              </div>
+              <p class="prop-desc">{p.description[:400]}</p>
             </div>
-            <p class="prop-desc">{p.description[:400]}</p>
-          </div>
 
-          <div class="specs-row">
-            <div class="spec-item">
-              <span class="spec-icon">📐</span>
-              <div><span class="spec-val">{p.area}</span><span class="spec-lbl">{"Área" if lang else "Area"}</span></div>
-            </div>
-            <div class="spec-divider"></div>
-            <div class="spec-item">
-              <span class="spec-icon">🛏</span>
-              <div><span class="spec-val">{p.bedrooms}</span><span class="spec-lbl">{"Recámaras" if lang else "Bedrooms"}</span></div>
-            </div>
-            <div class="spec-divider"></div>
-            <div class="spec-item">
-              <span class="spec-icon">🚿</span>
-              <div><span class="spec-val">{p.bathrooms}</span><span class="spec-lbl">{"Baños" if lang else "Bathrooms"}</span></div>
-            </div>
-            <div class="spec-divider"></div>
-            <div class="spec-item">
-              <span class="spec-icon">🚗</span>
-              <div><span class="spec-val">{p.parking}</span><span class="spec-lbl">{"Estacionamiento" if lang else "Parking"}</span></div>
+            <div class="specs-row">
+              <div class="spec-item">
+                <span class="spec-icon">📐</span>
+                <div><span class="spec-val">{p.area}</span><span class="spec-lbl">{"Área" if lang else "Area"}</span></div>
+              </div>
+              <div class="spec-divider"></div>
+              <div class="spec-item">
+                <span class="spec-icon">🛏</span>
+                <div><span class="spec-val">{p.bedrooms}</span><span class="spec-lbl">{"Recámaras" if lang else "Bedrooms"}</span></div>
+              </div>
+              <div class="spec-divider"></div>
+              <div class="spec-item">
+                <span class="spec-icon">🚿</span>
+                <div><span class="spec-val">{p.bathrooms}</span><span class="spec-lbl">{"Baños" if lang else "Bathrooms"}</span></div>
+              </div>
+              <div class="spec-divider"></div>
+              <div class="spec-item">
+                <span class="spec-icon">🚗</span>
+                <div><span class="spec-val">{p.parking}</span><span class="spec-lbl">{"Estacionamiento" if lang else "Parking"}</span></div>
+              </div>
             </div>
           </div>
 
@@ -348,7 +350,7 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
 .prop-num{{font-size:12px;color:rgba(255,255,255,0.75);font-weight:500;}}
 
 /* ── Gallery: main image + 3 stacked on right ── */
-.gallery{{display:flex;gap:5px;padding:16px 24px 0;height:395px;flex-shrink:0;overflow:hidden;}}
+.gallery{{display:flex;gap:5px;padding:12px 24px 0;flex:7;min-height:0;overflow:hidden;}}
 .gallery-main{{flex:3;min-width:0;overflow:hidden;border-radius:8px;}}
 .gallery-side{{flex:1.5;display:flex;flex-direction:column;gap:5px;min-width:0;overflow:hidden;}}
 .side-slot{{flex:1;min-height:0;overflow:hidden;border-radius:6px;}}
@@ -358,7 +360,7 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
 .placeholder span{{font-size:11px;color:#aaa;}}
 
 /* ── Specs row (above footer) ── */
-.specs-row{{display:flex;align-items:center;gap:0;padding:0 24px;background:#F4F7FF;border-top:2px solid #003DA5;border-bottom:1px solid #DDE5F5;height:68px;flex-shrink:0;}}
+.specs-row{{display:flex;align-items:center;gap:0;padding:0 24px;background:#F4F7FF;border-top:2px solid #003DA5;border-bottom:1px solid #DDE5F5;height:62px;flex-shrink:0;}}
 .spec-item{{display:flex;align-items:center;gap:10px;flex:1;padding:0 16px;}}
 .spec-icon{{font-size:18px;}}
 .spec-val{{display:block;font-family:'Montserrat',sans-serif;font-size:15px;font-weight:700;color:#001F5B;line-height:1;}}
@@ -366,7 +368,8 @@ body{{font-family:'Inter',sans-serif;background:#fff;-webkit-print-color-adjust:
 .spec-divider{{width:1px;height:36px;background:#D0DAF0;flex-shrink:0;}}
 
 /* ── Property info (below specs) ── */
-.prop-info{{flex:1;padding:16px 28px 12px;display:flex;flex-direction:column;gap:8px;overflow:hidden;}}
+.content-area{{flex:3;min-height:0;display:flex;flex-direction:column;}}
+.prop-info{{flex:1;min-height:0;padding:14px 28px 8px;display:flex;flex-direction:column;gap:6px;overflow:hidden;}}
 .prop-desc{{font-size:12.5px;color:#444;line-height:1.75;overflow:hidden;text-align:justify;}}
 .prop-title{{font-family:'Montserrat',sans-serif;font-size:18px;font-weight:900;color:#001F5B;line-height:1.3;}}
 .prop-price-row{{display:flex;align-items:baseline;gap:20px;}}

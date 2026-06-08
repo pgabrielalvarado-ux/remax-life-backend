@@ -7,6 +7,7 @@ import httpx
 from bs4 import BeautifulSoup
 import asyncio
 import io
+import os
 import base64
 import re
 from datetime import datetime
@@ -469,3 +470,188 @@ async def generate_pdf(req: PropertyRequest):
         media_type="text/html",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
+
+
+# ── Generador de Listings IA ──────────────────────────────────────────────
+# El frontend (ListingPage) envía los datos del formulario + fotos en base64.
+# La API key de Anthropic vive SOLO aquí, como variable de entorno
+# ANTHROPIC_API_KEY. El navegador nunca la ve.
+
+LISTING_MODEL = "claude-sonnet-4-20250514"
+ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+
+LISTING_SYSTEM_PROMPT = """Eres el Agente de Listings RE/MAX Life, un sistema de IA especializado en bienes raíces en Panamá. Tu misión es tomar la información de una propiedad captada por un agente y producir un listing profesional, bilingüe y listo para publicar en portales internacionales.
+
+Operas como orquestador de tres sub-agentes especializados:
+
+SUB-AGENTE 1 — INVESTIGADOR DE MERCADO
+Investiga el edificio/proyecto: año de construcción, desarrolladora, amenidades, reputación. Investiga la zona: puntos de interés, perfil del vecindario, conectividad. Investiga el mercado: precios de referencia, tendencia de demanda. Produce un reporte interno que alimenta al Sub-Agente 2.
+
+SUB-AGENTE 2 — COPYWRITER INMOBILIARIO
+Con base en la información del agente y el reporte del Sub-Agente 1, redacta el listing completo en español e inglés. El perfil objetivo es el inversionista extranjero o jubilado internacional, ticket $150K–$800K+.
+
+ESTRUCTURA DEL LISTING (español e inglés):
+- TÍTULO (máx. 80 caracteres): específico, beneficio principal primero
+- DESCRIPCIÓN CORTA (250–350 caracteres): funciona sola
+- DESCRIPCIÓN LARGA (400–700 palabras): gancho → inmueble → edificio → zona → valor para el comprador → CTA
+- FICHA TÉCNICA: tipo, operación, precio, m², habitaciones, baños, parqueos, amueblado, edificio, zona, piso
+- KEYWORDS (5–8 palabras clave)
+
+SUB-AGENTE 3 — ANALISTA DE FOTOGRAFÍAS
+Si hay fotos adjuntas, analiza cada una evaluando: calidad técnica, composición, presentación del espacio, efectividad de marketing, uso de luz natural. Entrega: orden recomendado, fotos a incluir/descartar, qué falta, tips para próximas sesiones.
+
+REGLAS: Nunca inventar datos. Precios en USD. El inglés es adaptación cultural, no traducción literal. Indicar al agente que revise antes de publicar.
+
+FORMATO DE SALIDA — usa estos separadores exactamente:
+
+===INVESTIGACION===
+[Reporte de investigación]
+
+===LISTING_ES===
+TÍTULO:
+[título]
+
+DESCRIPCIÓN CORTA:
+[descripción corta]
+
+DESCRIPCIÓN LARGA:
+[descripción larga]
+
+FICHA TÉCNICA:
+[ficha]
+
+KEYWORDS:
+[keywords]
+
+===LISTING_EN===
+TITLE:
+[title]
+
+SHORT DESCRIPTION:
+[short description]
+
+LONG DESCRIPTION:
+[long description]
+
+PROPERTY HIGHLIGHTS:
+[highlights]
+
+KEYWORDS:
+[keywords]
+
+===FOTOS===
+[Análisis de fotografías o nota si no hay fotos]
+
+===NOTAS_AGENTE===
+[Observaciones de mercado y recomendación final]
+
+Identidad de marca: RE/MAX Life — La primera franquicia RE/MAX en Panamá. Premium, confiable, internacional."""
+
+
+class ListingPhoto(BaseModel):
+    media_type: str = "image/jpeg"
+    data: str
+
+
+class ListingForm(BaseModel):
+    operacion: str = "Venta"
+    tipo: str = "Apartamento"
+    edificio: str = ""
+    zona: str = ""
+    piso: str = ""
+    m2: str = ""
+    habitaciones: str = ""
+    banos: str = ""
+    parqueos: str = ""
+    precio: str = ""
+    amueblado: str = "No"
+    caracteristicas: str = ""
+    restricciones: str = ""
+    agente: str = ""
+
+
+class ListingRequest(BaseModel):
+    form: ListingForm
+    photos: List[ListingPhoto] = []
+
+
+@app.post("/api/generate-listing")
+async def generate_listing(req: ListingRequest):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="ANTHROPIC_API_KEY no está configurada en el servidor (Railway).",
+        )
+
+    f = req.form
+    if not (f.edificio and f.zona and f.m2 and f.habitaciones and f.banos and f.precio and f.agente):
+        raise HTTPException(status_code=400, detail="Faltan campos obligatorios de la propiedad.")
+
+    if len(req.photos) > 20:
+        raise HTTPException(status_code=400, detail="Máximo 20 fotos por listing.")
+
+    prop_text = (
+        "DATOS DE LA PROPIEDAD:\n"
+        f"Tipo de operación: {f.operacion}\n"
+        f"Tipo de inmueble: {f.tipo}\n"
+        f"Nombre del edificio/proyecto: {f.edificio}\n"
+        f"Zona/barrio: {f.zona}\n"
+        f"Piso: {f.piso or 'No especificado'}\n"
+        f"Metros cuadrados: {f.m2} m²\n"
+        f"Habitaciones: {f.habitaciones}\n"
+        f"Baños: {f.banos}\n"
+        f"Parqueos: {f.parqueos or 'No especificado'}\n"
+        f"Precio: ${f.precio}\n"
+        f"Amueblado: {f.amueblado}\n"
+        f"Características: {f.caracteristicas or 'No especificado'}\n"
+        f"Restricciones: {f.restricciones or 'Ninguna'}\n"
+        f"Agente: {f.agente}\n"
+        "Ciudad: Panama City, Panamá\n\n"
+        "Ejecuta los tres sub-agentes y genera el listing completo."
+    )
+
+    content = [{"type": "text", "text": prop_text}]
+    for p in req.photos:
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": p.media_type or "image/jpeg",
+                "data": p.data,
+            },
+        })
+
+    payload = {
+        "model": LISTING_MODEL,
+        "max_tokens": 4000,
+        "system": LISTING_SYSTEM_PROMPT,
+        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "messages": [{"role": "user", "content": content}],
+    }
+
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        try:
+            resp = await client.post(ANTHROPIC_MESSAGES_URL, json=payload, headers=headers)
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=502, detail=f"No se pudo contactar a Anthropic: {e}")
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=f"Anthropic API error {resp.status_code}: {resp.text[:300]}",
+        )
+
+    data = resp.json()
+    full_text = "\n".join(
+        block.get("text", "")
+        for block in data.get("content", [])
+        if block.get("type") == "text"
+    )
+    return {"text": full_text}

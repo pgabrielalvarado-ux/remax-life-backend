@@ -47,7 +47,8 @@ def cmd_list():
         return
     print(f"Agentes ({len(agents)}):")
     for username, info in sorted(agents.items()):
-        print(f"  - {username}  ({info.get('name', username)})")
+        tag = "  [admin]" if info.get("admin") else ""
+        print(f"  - {username}  ({info.get('name', username)}){tag}")
 
 
 def cmd_remove():
@@ -68,6 +69,7 @@ def cmd_add():
         print("Usuario inválido (sin espacios, no vacío).")
         sys.exit(1)
     name = input("Nombre para mostrar: ").strip() or username
+    is_admin = input("¿Es administrador? (ve el historial de TODOS) [s/N]: ").strip().lower() in ("s", "si", "sí", "y", "yes")
     pw1 = getpass.getpass("Contraseña: ")
     pw2 = getpass.getpass("Repite la contraseña: ")
     if pw1 != pw2:
@@ -78,9 +80,9 @@ def cmd_add():
         sys.exit(1)
     h = bcrypt.hashpw(pw1.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     existed = username in data["agents"]
-    data["agents"][username] = {"name": name, "hash": h}
+    data["agents"][username] = {"name": name, "hash": h, "admin": is_admin}
     save(data)
-    print(f"{'Actualizado' if existed else 'Creado'}: {username} ({name})")
+    print(f"{'Actualizado' if existed else 'Creado'}: {username} ({name}){' [admin]' if is_admin else ''}")
     print(f"Total agentes: {len(data['agents'])}")
     print("No olvides desplegar: railway up")
 

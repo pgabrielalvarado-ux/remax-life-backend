@@ -12,6 +12,7 @@ import os
 import base64
 import re
 import json
+import sqlite3
 import jwt
 import bcrypt
 from datetime import datetime, timedelta, timezone
@@ -704,6 +705,10 @@ async def generate_listing(req: ListingRequest, user=Depends(require_auth)):
         for block in data.get("content", [])
         if block.get("type") == "text"
     )
+    try:
+        _record_listing(user, f, len(req.photos), full_text)
+    except Exception:
+        pass  # nunca romper la generación por un fallo de registro
     return {"text": full_text}
 
 
@@ -734,3 +739,105 @@ def login(req: LoginRequest):
 @app.get("/api/me")
 def me(user=Depends(require_auth)):
     return {"sub": user.get("sub"), "name": user.get("name")}
+
+
+# ── Registro de listings (historial en SQLite) ─────────────────────────────
+# Persistencia en DATA_DIR (en Railway, un Volume montado en /data para que
+# sobreviva a los redeploys). Localmente cae junto al backend.
+
+DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(DATA_DIR, "listings.db")
+
+
+def _db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with _db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS listings (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at    TEXT NOT NULL,
+                agent_sub     TEXT NOT NULL,
+                agent_name    TEXT,
+                operacion     TEXT,
+                tipo          TEXT,
+                edificio      TEXT,
+                zona          TEXT,
+                piso          TEXT,
+                precio        TEXT,
+                m2            TEXT,
+                habitaciones  TEXT,
+                banos         TEXT,
+                parqueos      TEXT,
+                amueblado     TEXT,
+                photo_count   INTEGER,
+                listing_text  TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_listings_agent ON listings(agent_sub)")
+
+
+def _record_listing(user, form, photo_count, listing_text):
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO listings (
+                created_at, agent_sub, agent_name, operacion, tipo, edificio, zona,
+                piso, precio, m2, habitaciones, banos, parqueos, amueblado,
+                photo_count, listing_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                user.get("sub", ""), user.get("name", ""),
+                form.operacion, form.tipo, form.edificio, form.zona, form.piso,
+                form.precio, form.m2, form.habitaciones, form.banos, form.parqueos,
+                form.amueblado, photo_count, listing_text,
+            ),
+        )
+
+
+def _is_admin(sub: str) -> bool:
+    u = _load_users().get(sub or "")
+    return bool(u and u.get("admin"))
+
+
+init_db()
+
+
+@app.get("/api/listings")
+def list_listings(user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    cols = ("id, created_at, agent_sub, agent_name, operacion, tipo, edificio, "
+            "zona, precio, m2, habitaciones, banos, photo_count")
+    with _db() as conn:
+        if _is_admin(sub):
+            rows = conn.execute(
+                f"SELECT {cols} FROM listings ORDER BY id DESC LIMIT 500"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {cols} FROM listings WHERE agent_sub = ? ORDER BY id DESC LIMIT 500",
+                (sub,),
+            ).fetchall()
+    return {"is_admin": _is_admin(sub), "listings": [dict(r) for r in rows]}
+
+
+@app.get("/api/listings/{listing_id}")
+def get_listing(listing_id: int, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Listing no encontrado.")
+    rec = dict(row)
+    if not _is_admin(sub) and rec.get("agent_sub") != sub:
+        raise HTTPException(status_code=404, detail="Listing no encontrado.")
+    return rec

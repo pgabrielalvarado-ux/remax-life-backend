@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
@@ -10,7 +11,10 @@ import io
 import os
 import base64
 import re
-from datetime import datetime
+import json
+import jwt
+import bcrypt
+from datetime import datetime, timedelta, timezone
 
 app = FastAPI(title="RE/MAX Life - Property PDF Generator")
 
@@ -25,6 +29,52 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Autenticación (JWT) ────────────────────────────────────────────────────
+# Login server-side: solo agentes con usuario + contraseña válidos obtienen un
+# token JWT (7 días). Los endpoints sensibles lo exigen. El secreto de firma
+# vive en la variable de entorno JWT_SECRET (Railway). Las contraseñas se
+# guardan hasheadas con bcrypt en users.json (ver add_user.py).
+
+USERS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
+JWT_ALG = "HS256"
+TOKEN_DAYS = 7
+_bearer = HTTPBearer(auto_error=False)
+
+
+def _load_users() -> dict:
+    try:
+        with open(USERS_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data.get("agents", data)  # admite {"agents": {...}} o {...}
+    except FileNotFoundError:
+        return {}
+
+
+def _jwt_secret() -> str:
+    secret = os.environ.get("JWT_SECRET")
+    if not secret:
+        raise HTTPException(status_code=500, detail="JWT_SECRET no está configurado en el servidor.")
+    return secret
+
+
+def require_auth(creds: HTTPAuthorizationCredentials = Depends(_bearer)):
+    if creds is None or not creds.credentials:
+        raise HTTPException(status_code=401, detail="No autenticado.")
+    try:
+        payload = jwt.decode(creds.credentials, _jwt_secret(), algorithms=[JWT_ALG])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Sesión expirada. Inicia sesión de nuevo.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Token inválido.")
+    return payload
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 
 HEADERS = {
     "User-Agent": (
@@ -442,13 +492,13 @@ def health():
 
 
 @app.post("/scrape")
-async def scrape_property(url: str):
+async def scrape_property(url: str, user=Depends(require_auth)):
     data = await scrape_encuentra24(url)
     return data
 
 
 @app.post("/generate")
-async def generate_pdf(req: PropertyRequest):
+async def generate_pdf(req: PropertyRequest, user=Depends(require_auth)):
     if not req.urls:
         raise HTTPException(status_code=400, detail="Se requiere al menos un URL.")
     if len(req.urls) > 10:
@@ -576,7 +626,7 @@ class ListingRequest(BaseModel):
 
 
 @app.post("/api/generate-listing")
-async def generate_listing(req: ListingRequest):
+async def generate_listing(req: ListingRequest, user=Depends(require_auth)):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(
@@ -655,3 +705,32 @@ async def generate_listing(req: ListingRequest):
         if block.get("type") == "text"
     )
     return {"text": full_text}
+
+
+# ── Endpoints de autenticación ─────────────────────────────────────────────
+
+@app.post("/api/login")
+def login(req: LoginRequest):
+    users = _load_users()
+    key = req.username.strip().lower()
+    u = users.get(key)
+    ok = False
+    if u and u.get("hash"):
+        try:
+            ok = bcrypt.checkpw(req.password.encode("utf-8"), u["hash"].encode("utf-8"))
+        except ValueError:
+            ok = False
+    if not ok:
+        raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos.")
+    exp = datetime.now(timezone.utc) + timedelta(days=TOKEN_DAYS)
+    token = jwt.encode(
+        {"sub": key, "name": u.get("name", key), "exp": exp},
+        _jwt_secret(),
+        algorithm=JWT_ALG,
+    )
+    return {"token": token, "name": u.get("name", key)}
+
+
+@app.get("/api/me")
+def me(user=Depends(require_auth)):
+    return {"sub": user.get("sub"), "name": user.get("name")}

@@ -782,6 +782,44 @@ def init_db():
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_listings_agent ON listings(agent_sub)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_closings (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at    TEXT NOT NULL,
+                agent_sub     TEXT NOT NULL,
+                edificio      TEXT,
+                zona          TEXT NOT NULL,
+                tipo          TEXT NOT NULL,
+                operacion     TEXT NOT NULL,
+                m2            REAL,
+                precio_cierre REAL NOT NULL,
+                fecha_cierre  TEXT NOT NULL,
+                piso          TEXT,
+                habitaciones  TEXT,
+                banos         TEXT,
+                parqueos      TEXT,
+                finca         TEXT,
+                notas         TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_closings_zona ON market_closings(zona)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_closings_edificio ON market_closings(edificio)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_closings_agent ON market_closings(agent_sub)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_analyses (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at    TEXT NOT NULL,
+                agent_sub     TEXT NOT NULL,
+                agent_name    TEXT,
+                mode          TEXT NOT NULL,
+                input_summary TEXT,
+                analysis_text TEXT NOT NULL
+            )
+            """
+        )
 
 
 def _record_listing(user, form, photo_count, listing_text):
@@ -841,3 +879,406 @@ def get_listing(listing_id: int, user=Depends(require_auth)):
     if not _is_admin(sub) and rec.get("agent_sub") != sub:
         raise HTTPException(status_code=404, detail="Listing no encontrado.")
     return rec
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ── Análisis de Mercado (multi-agente real: Recopilador → Analista) ─────────
+# ══════════════════════════════════════════════════════════════════════════
+
+class ClosingRecord(BaseModel):
+    edificio: Optional[str] = None
+    zona: str
+    tipo: str
+    operacion: str
+    m2: Optional[float] = None
+    precio_cierre: float
+    fecha_cierre: str
+    piso: Optional[str] = None
+    habitaciones: Optional[str] = None
+    banos: Optional[str] = None
+    parqueos: Optional[str] = None
+    finca: Optional[str] = None
+    notas: Optional[str] = None
+
+
+class MarketAnalysisRequest(BaseModel):
+    mode: str  # "captacion" | "comprador" | "inversion"
+    # Mode 1 — captación
+    edificio: Optional[str] = None
+    zona: Optional[str] = None
+    tipo: Optional[str] = None
+    operacion: Optional[str] = None
+    m2: Optional[float] = None
+    habitaciones: Optional[str] = None
+    banos: Optional[str] = None
+    parqueos: Optional[str] = None
+    precio_propuesto: Optional[float] = None
+    # Mode 2 — comprador
+    presupuesto_min: Optional[float] = None
+    presupuesto_max: Optional[float] = None
+    zonas_interes: Optional[str] = None
+    perfil_comprador: Optional[str] = None
+    tipo_propiedad: Optional[str] = None
+    # Mode 3 — inversión
+    zonas_comparar: Optional[str] = None
+    tipo_inversion: Optional[str] = None
+    horizonte: Optional[str] = None
+
+
+DATA_AGGREGATOR_PROMPT = """
+Eres el Agente Recopilador de Datos del sistema de análisis de mercado inmobiliario de RE/MAX Life Panamá.
+
+Tu única función es recopilar, organizar y estructurar datos de mercado. NO produces análisis ni recomendaciones — solo datos limpios y verificados.
+
+TAREA:
+1. Usa web_search para buscar propiedades activas en Encuentra24 y Compreoalquile que coincidan con el perfil solicitado (zona, tipo, operación, rango de características).
+2. Busca al menos 5–8 comparables activos. Para cada uno registra: edificio, zona, piso, m², precio de lista, precio/m², amenidades clave, tiempo estimado en mercado si visible.
+3. Busca también precios de alquiler activos para la zona (útil para calcular yield en cualquier modo).
+4. Consolida esos datos con los CIERRES INTERNOS que recibirás en el mensaje del usuario.
+5. Distingue siempre entre PRECIO DE LISTA (portales) y PRECIO DE CIERRE REAL (datos internos).
+
+OUTPUT — responde ÚNICAMENTE con este bloque estructurado, sin texto adicional antes ni después:
+
+===DATOS_MERCADO===
+COMPARABLES ACTIVOS EN MERCADO:
+[tabla con columnas: Edificio | Zona | M² | Precio Lista | $/m² | Características]
+
+PRECIOS DE ALQUILER ACTIVOS (zona):
+[rango de precios encontrados para el tipo de propiedad]
+
+CIERRES REALES (fuente interna RE/MAX Life):
+[reproduce los datos internos recibidos de forma tabular]
+
+ESTADÍSTICAS CONSOLIDADAS:
+- Precio/m² promedio mercado activo: $X
+- Precio/m² promedio cierres reales: $X
+- Diferencia lista vs cierre: X%
+- Yield estimado de alquiler: X% anual
+- Velocidad de mercado: [estimado basado en volumen de listings]
+- Fuentes consultadas: [lista URLs o portales]
+===FIN_DATOS===
+"""
+
+
+MARKET_ANALYST_PROMPT = """
+Eres el Agente Analista de Mercado de RE/MAX Life Panamá. Eres un experto en el mercado inmobiliario panameño con 15 años de experiencia, especializado en inversionistas extranjeros y compradores de ticket medio-alto.
+
+Recibirás datos de mercado ya recopilados y estructurados. Tu trabajo es producir un análisis accionable basado EXCLUSIVAMENTE en esos datos — no busques información adicional.
+
+PRINCIPIOS DE ANÁLISIS:
+- Sé específico con números. Nunca digas "los precios son competitivos" — di "$X/m² vs promedio de $Y/m² en la zona".
+- Distingue siempre precio de lista vs precio de cierre real. El precio de cierre es la verdad.
+- Calibra el tono al modo: técnico para captación e inversión, claro y vendedor para comprador.
+- Si los datos son insuficientes para una conclusión, dilo explícitamente en lugar de inventar.
+
+MODO CAPTACION — output structure:
+===DATOS_MERCADO===
+[reproduce el resumen estadístico de los datos recibidos]
+
+===ANALISIS===
+POSICIONAMIENTO COMPETITIVO
+[cómo se compara esta propiedad vs los comparables activos]
+
+ANÁLISIS DE PRECIO
+[precio recomendado con justificación numérica basada en comparables y cierres]
+
+VELOCIDAD DE ABSORCIÓN
+[estimado de tiempo en mercado basado en datos disponibles]
+
+===RECOMENDACION===
+PRECIO RECOMENDADO DE CAPTACIÓN: $X
+RANGO DE NEGOCIACIÓN: $X – $X
+ESTRATEGIA: [2–3 oraciones accionables para el agente]
+
+MODO COMPRADOR — output structure:
+===DATOS_MERCADO===
+[resumen de opciones disponibles en el mercado]
+
+===ANALISIS===
+ANÁLISIS POR ZONA
+[comparativa de zonas dentro del presupuesto del comprador]
+
+MEJOR VALOR ACTUAL
+[las 2–3 opciones con mejor relación precio/valor basadas en datos]
+
+PERSPECTIVA DE PLUSVALÍA
+[tendencia basada en historial de cierres internos disponibles]
+
+===RECOMENDACION===
+RECOMENDACIÓN PARA EL CLIENTE:
+Tier 1 — Opción conservadora: [zona/tipo/rango de precio]
+Tier 2 — Opción balanceada: [zona/tipo/rango de precio]
+Tier 3 — Opción con mayor potencial: [zona/tipo/rango de precio]
+
+MODO INVERSION — output structure:
+===DATOS_MERCADO===
+[estadísticas por zona]
+
+===TABLA_COMPARATIVA===
+Zona | Precio/m² promedio | Yield estimado | Tendencia | Liquidez | Rating
+[una fila por zona analizada, con datos numéricos reales]
+
+===ANALISIS===
+ANÁLISIS POR ZONA
+[narrativa por cada zona comparada, con datos específicos]
+
+OPORTUNIDAD VS RIESGO
+[evaluación basada en datos]
+
+===RECOMENDACION===
+VEREDICTO DE INVERSIÓN:
+[recomendación directa con justificación numérica]
+ZONA RECOMENDADA: [nombre]
+RAZÓN PRINCIPAL: [una oración con número]
+"""
+
+
+# Etiquetas en español para _format_request_params (campos de MarketAnalysisRequest)
+_PARAM_LABELS = [
+    ("edificio", "Edificio"),
+    ("zona", "Zona"),
+    ("tipo", "Tipo"),
+    ("operacion", "Operación"),
+    ("m2", "M²"),
+    ("habitaciones", "Habitaciones"),
+    ("banos", "Baños"),
+    ("parqueos", "Parqueos"),
+    ("precio_propuesto", "Precio propuesto"),
+    ("presupuesto_min", "Presupuesto mínimo"),
+    ("presupuesto_max", "Presupuesto máximo"),
+    ("zonas_interes", "Zonas de interés"),
+    ("perfil_comprador", "Perfil del comprador"),
+    ("tipo_propiedad", "Tipo de propiedad"),
+    ("zonas_comparar", "Zonas a comparar"),
+    ("tipo_inversion", "Tipo de inversión"),
+    ("horizonte", "Horizonte"),
+]
+
+
+def _format_request_params(req) -> str:
+    lines = []
+    for field, label in _PARAM_LABELS:
+        value = getattr(req, field, None)
+        if value is None or value == "":
+            continue
+        if isinstance(value, float):
+            value = f"${value:,.0f}" if field in ("precio_propuesto", "presupuesto_min", "presupuesto_max") else f"{value:g}"
+        lines.append(f"{label}: {value}")
+    return "\n".join(lines) if lines else "(sin parámetros adicionales)"
+
+
+def _get_relevant_closings(req) -> str:
+    clauses, params = [], []
+    if getattr(req, "zona", None):
+        clauses.append("zona = ?"); params.append(req.zona)
+    if getattr(req, "edificio", None):
+        clauses.append("edificio = ?"); params.append(req.edificio)
+    if getattr(req, "tipo", None):
+        clauses.append("tipo = ?"); params.append(req.tipo)
+    if getattr(req, "operacion", None):
+        clauses.append("operacion = ?"); params.append(req.operacion)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with _db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM market_closings {where} ORDER BY fecha_cierre DESC LIMIT 20",
+            params,
+        ).fetchall()
+
+    if not rows:
+        return ("CIERRES INTERNOS: Sin registros para esta búsqueda. "
+                "El análisis se basará exclusivamente en datos de mercado público.")
+
+    label = req.zona or req.edificio or getattr(req, "zonas_interes", None) or getattr(req, "zonas_comparar", None) or "varios"
+    out = [f"CIERRES INTERNOS RE/MAX LIFE — {label}", f"Total registros encontrados: {len(rows)}", ""]
+    for r in rows:
+        m2 = r["m2"]
+        ppm2 = f"${r['precio_cierre'] / m2:,.0f}" if m2 else "—"
+        m2_txt = f"{m2:g}m²" if m2 else "—"
+        out.append(
+            f"{r['fecha_cierre']} | {r['edificio'] or '—'} | {r['tipo']} | {r['operacion']} | "
+            f"{m2_txt} | ${r['precio_cierre']:,.0f} | $/m²: {ppm2} | Piso: {r['piso'] or '—'}"
+        )
+
+    precios = [r["precio_cierre"] for r in rows]
+    ppm2s = [r["precio_cierre"] / r["m2"] for r in rows if r["m2"]]
+    fechas = sorted(r["fecha_cierre"] for r in rows)
+    out.append("")
+    out.append("Resumen estadístico:")
+    out.append(f"- Precio promedio de cierre: ${sum(precios) / len(precios):,.0f}")
+    if ppm2s:
+        out.append(f"- Precio/m² promedio: ${sum(ppm2s) / len(ppm2s):,.0f}")
+    out.append(f"- Rango: ${min(precios):,.0f} – ${max(precios):,.0f}")
+    out.append(f"- Período cubierto: {fechas[0]} a {fechas[-1]}")
+    return "\n".join(out)
+
+
+def _record_analysis(sub, agent_name, mode, req, text):
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO market_analyses
+                (created_at, agent_sub, agent_name, mode, input_summary, analysis_text)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                sub, agent_name, mode, _format_request_params(req), text,
+            ),
+        )
+
+
+async def _run_data_aggregator(req, internal_data):
+    # SUB-AGENTE 1 — Recopilador de datos (web_search ACTIVADO).
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY no está configurada en el servidor (Railway).")
+
+    user_msg = f"""
+SOLICITUD DE ANÁLISIS — MODO: {req.mode.upper()}
+
+PARÁMETROS DE BÚSQUEDA:
+{_format_request_params(req)}
+
+{internal_data}
+
+Recopila datos de mercado para este perfil específico en Panamá.
+"""
+
+    payload = {
+        "model": LISTING_MODEL,
+        "max_tokens": 4000,
+        "system": DATA_AGGREGATOR_PROMPT,
+        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "messages": [{"role": "user", "content": user_msg}],
+    }
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        try:
+            resp = await client.post(ANTHROPIC_MESSAGES_URL, json=payload, headers=headers)
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=502, detail=f"No se pudo contactar a Anthropic (recopilador): {e}")
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=f"Anthropic API error {resp.status_code} (recopilador): {resp.text[:300]}",
+        )
+    data = resp.json()
+    return "\n".join(
+        block.get("text", "")
+        for block in data.get("content", [])
+        if block.get("type") == "text"
+    )
+
+
+async def _run_market_analyst(req, aggregator_result):
+    # SUB-AGENTE 2 — Analista de mercado (tools=[], sin web_search).
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY no está configurada en el servidor (Railway).")
+
+    user_msg = f"""
+MODO: {req.mode.upper()}
+PARÁMETROS ORIGINALES: {_format_request_params(req)}
+
+DATOS DE MERCADO RECOPILADOS:
+{aggregator_result}
+
+Produce el análisis completo para este caso.
+"""
+
+    payload = {
+        "model": LISTING_MODEL,
+        "max_tokens": 4000,
+        "system": MARKET_ANALYST_PROMPT,
+        "tools": [],
+        "messages": [{"role": "user", "content": user_msg}],
+    }
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        try:
+            resp = await client.post(ANTHROPIC_MESSAGES_URL, json=payload, headers=headers)
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=502, detail=f"No se pudo contactar a Anthropic (analista): {e}")
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=f"Anthropic API error {resp.status_code} (analista): {resp.text[:300]}",
+        )
+    data = resp.json()
+    return "\n".join(
+        block.get("text", "")
+        for block in data.get("content", [])
+        if block.get("type") == "text"
+    )
+
+
+@app.post("/api/closings")
+def create_closing(req: ClosingRecord, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    with _db() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO market_closings (
+                created_at, agent_sub, edificio, zona, tipo, operacion, m2,
+                precio_cierre, fecha_cierre, piso, habitaciones, banos, parqueos, finca, notas
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                sub, req.edificio, req.zona, req.tipo, req.operacion, req.m2,
+                req.precio_cierre, req.fecha_cierre, req.piso, req.habitaciones,
+                req.banos, req.parqueos, req.finca, req.notas,
+            ),
+        )
+        new_id = cur.lastrowid
+    return {"id": new_id, "message": "Cierre registrado"}
+
+
+@app.get("/api/closings")
+def list_closings(zona: Optional[str] = None, edificio: Optional[str] = None,
+                  limit: int = 50, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    clauses, params = [], []
+    if not _is_admin(sub):
+        clauses.append("agent_sub = ?"); params.append(sub)
+    if zona:
+        clauses.append("zona = ?"); params.append(zona)
+    if edificio:
+        clauses.append("edificio = ?"); params.append(edificio)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with _db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM market_closings {where} ORDER BY fecha_cierre DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
+    return {"closings": [dict(r) for r in rows], "total": len(rows)}
+
+
+@app.post("/api/analyze-market")
+async def analyze_market(req: MarketAnalysisRequest, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    agent_name = user.get("name", sub)
+
+    # STEP 1: cierres internos relevantes (DB)
+    internal_data = _get_relevant_closings(req)
+
+    # STEP 2: SUB-AGENTE 1 — Recopilador de Datos (web_search)
+    aggregator_result = await _run_data_aggregator(req, internal_data)
+
+    # STEP 3: SUB-AGENTE 2 — Analista de Mercado (sin web_search)
+    analysis_result = await _run_market_analyst(req, aggregator_result)
+
+    # STEP 4: persistir y devolver
+    try:
+        _record_analysis(sub, agent_name, req.mode, req, analysis_result)
+    except Exception:
+        pass  # nunca romper el análisis por un fallo de registro
+    return {"text": analysis_result, "data_context": aggregator_result}

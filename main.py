@@ -532,6 +532,11 @@ async def generate_pdf(req: PropertyRequest, user=Depends(require_auth)):
 LISTING_MODEL = "claude-sonnet-4-20250514"
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 
+# Tarifas de claude-sonnet-4 (para estimar gasto por llamada)
+USD_PER_MTOK_INPUT = 3.0
+USD_PER_MTOK_OUTPUT = 15.0
+USD_PER_1K_WEB_SEARCHES = 10.0
+
 LISTING_SYSTEM_PROMPT = """Eres el Agente de Listings RE/MAX Life, un sistema de IA especializado en bienes raíces en Panamá. Tu misión es tomar la información de una propiedad captada por un agente y producir un listing profesional, bilingüe y listo para publicar en portales internacionales.
 
 Operas como orquestador de tres sub-agentes especializados:
@@ -701,6 +706,7 @@ async def generate_listing(req: ListingRequest, user=Depends(require_auth)):
         )
 
     data = resp.json()
+    _record_usage(user, "listing", data.get("usage", {}))
     full_text = "\n".join(
         block.get("text", "")
         for block in data.get("content", [])
@@ -828,6 +834,22 @@ def init_db():
             conn.execute("ALTER TABLE market_analyses ADD COLUMN sources TEXT")
         except sqlite3.OperationalError:
             pass  # la columna ya existe
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_usage (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at    TEXT NOT NULL,
+                agent_sub     TEXT NOT NULL,
+                agent_name    TEXT,
+                tool          TEXT NOT NULL,
+                input_tokens  INTEGER,
+                output_tokens INTEGER,
+                web_searches  INTEGER,
+                est_cost_usd  REAL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_created ON api_usage(created_at)")
 
 
 def _record_listing(user, form, photo_count, listing_text):
@@ -848,6 +870,43 @@ def _record_listing(user, form, photo_count, listing_text):
                 form.amueblado, photo_count, listing_text,
             ),
         )
+
+
+def _record_usage(user, tool, usage_dict):
+    """Registra tokens y costo estimado de una llamada a Anthropic.
+
+    Envuelto COMPLETO en try/except: un fallo de registro jamás debe romper
+    la generación que lo origina.
+    """
+    try:
+        usage_dict = usage_dict if isinstance(usage_dict, dict) else {}
+        input_tokens = int(usage_dict.get("input_tokens") or 0)
+        output_tokens = int(usage_dict.get("output_tokens") or 0)
+        server_tool_use = usage_dict.get("server_tool_use")
+        web_searches = 0
+        if isinstance(server_tool_use, dict):
+            web_searches = int(server_tool_use.get("web_search_requests") or 0)
+        est_cost_usd = (
+            input_tokens / 1e6 * USD_PER_MTOK_INPUT
+            + output_tokens / 1e6 * USD_PER_MTOK_OUTPUT
+            + web_searches / 1000 * USD_PER_1K_WEB_SEARCHES
+        )
+        with _db() as conn:
+            conn.execute(
+                """
+                INSERT INTO api_usage
+                    (created_at, agent_sub, agent_name, tool,
+                     input_tokens, output_tokens, web_searches, est_cost_usd)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    user.get("sub", ""), user.get("name", ""), tool,
+                    input_tokens, output_tokens, web_searches, est_cost_usd,
+                ),
+            )
+    except Exception:
+        pass  # nunca romper la generación por un fallo de registro
 
 
 def _is_admin(sub: str) -> bool:
@@ -1201,7 +1260,11 @@ async def _anthropic_messages(system_prompt, user_msg, web_search):
                 text = "\n".join(
                     b.get("text", "") for b in content_blocks if b.get("type") == "text"
                 )
-                return {"text": text, "sources": _extract_web_sources(content_blocks)}
+                return {
+                    "text": text,
+                    "sources": _extract_web_sources(content_blocks),
+                    "usage": data.get("usage", {}),
+                }
             last_detail = resp.text[:300]
             if resp.status_code == 429 and attempt < 2:
                 try:
@@ -1234,7 +1297,7 @@ PARÁMETROS DE BÚSQUEDA:
 Recopila datos de mercado para este perfil específico en Panamá.
 """
     result = await _anthropic_messages(DATA_AGGREGATOR_PROMPT, user_msg, web_search=True)
-    return result["text"], result["sources"]
+    return result["text"], result["sources"], result.get("usage", {})
 
 
 async def _run_market_analyst(req, aggregator_result):
@@ -1249,7 +1312,8 @@ DATOS DE MERCADO RECOPILADOS:
 Produce el análisis completo para este caso.
 """
     result = await _anthropic_messages(MARKET_ANALYST_PROMPT, user_msg, web_search=False)
-    return result["text"]  # sin web_search las fuentes siempre vienen vacías
+    # sin web_search las fuentes siempre vienen vacías
+    return result["text"], result.get("usage", {})
 
 
 @app.post("/api/closings")
@@ -1303,10 +1367,12 @@ async def analyze_market(req: MarketAnalysisRequest, user=Depends(require_auth))
     internal_data = _get_relevant_closings(req)
 
     # STEP 2: SUB-AGENTE 1 — Recopilador de Datos (web_search + fuentes reales)
-    aggregator_result, sources = await _run_data_aggregator(req, internal_data)
+    aggregator_result, sources, aggregator_usage = await _run_data_aggregator(req, internal_data)
+    _record_usage(user, "acm", aggregator_usage)
 
     # STEP 3: SUB-AGENTE 2 — Analista de Mercado (sin web_search)
-    analysis_result = await _run_market_analyst(req, aggregator_result)
+    analysis_result, analyst_usage = await _run_market_analyst(req, aggregator_result)
+    _record_usage(user, "acm", analyst_usage)
 
     # STEP 4: persistir y devolver
     analysis_id = None
@@ -1591,3 +1657,95 @@ def market_report(analysis_id: int, user=Depends(require_auth)):
         media_type="text/html",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── Historial de ACMs ────────────────────────────────────────────────────────
+
+@app.get("/api/analyses")
+def list_analyses(user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    cols = "id, created_at, agent_sub, agent_name, mode, input_summary"
+    with _db() as conn:
+        if _is_admin(sub):
+            rows = conn.execute(
+                f"SELECT {cols} FROM market_analyses ORDER BY id DESC LIMIT 500"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {cols} FROM market_analyses WHERE agent_sub = ? ORDER BY id DESC LIMIT 500",
+                (sub,),
+            ).fetchall()
+    return {"is_admin": _is_admin(sub), "analyses": [dict(r) for r in rows]}
+
+
+@app.get("/api/analyses/{analysis_id}")
+def get_analysis(analysis_id: int, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM market_analyses WHERE id = ?", (analysis_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Análisis no encontrado.")
+    rec = dict(row)
+    if not _is_admin(sub) and rec.get("agent_sub") != sub:
+        raise HTTPException(status_code=404, detail="Análisis no encontrado.")
+    try:
+        sources = json.loads(rec.get("sources") or "[]")
+        rec["sources"] = sources if isinstance(sources, list) else []
+    except (json.JSONDecodeError, TypeError, ValueError):
+        rec["sources"] = []
+    return rec
+
+
+# ── Resumen de gasto en API (solo administradores) ───────────────────────────
+
+@app.get("/api/usage/summary")
+def usage_summary(user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    if not _is_admin(sub):
+        raise HTTPException(status_code=403, detail="Solo administradores.")
+
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    month_start = f"{month}-01"
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT tool,
+                   COUNT(*)                       AS calls,
+                   COALESCE(SUM(input_tokens), 0)  AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(web_searches), 0)  AS web_searches,
+                   COALESCE(SUM(est_cost_usd), 0)  AS est_cost_usd
+            FROM api_usage
+            WHERE created_at >= ?
+            GROUP BY tool
+            """,
+            (month_start,),
+        ).fetchall()
+
+    by_tool = {
+        t: {"est_cost_usd": 0.0, "calls": 0, "input_tokens": 0,
+            "output_tokens": 0, "web_searches": 0}
+        for t in ("acm", "listing")
+    }
+    total_cost = 0.0
+    total_calls = 0
+    for r in rows:
+        by_tool[r["tool"]] = {
+            "est_cost_usd": round(r["est_cost_usd"], 4),
+            "calls": r["calls"],
+            "input_tokens": r["input_tokens"],
+            "output_tokens": r["output_tokens"],
+            "web_searches": r["web_searches"],
+        }
+        total_cost += r["est_cost_usd"]
+        total_calls += r["calls"]
+
+    return {
+        "month": month,
+        "budget_usd": float(os.environ.get("MONTHLY_BUDGET_USD", "20")),
+        "est_cost_usd": round(total_cost, 4),
+        "by_tool": by_tool,
+        "total_calls": total_calls,
+    }

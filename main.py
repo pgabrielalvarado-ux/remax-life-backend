@@ -1127,12 +1127,59 @@ def _record_analysis(sub, agent_name, mode, req, text):
         )
 
 
-async def _run_data_aggregator(req, internal_data):
-    # SUB-AGENTE 1 — Recopilador de datos (web_search ACTIVADO).
+async def _anthropic_messages(system_prompt, user_msg, web_search):
+    """Messages API de Anthropic con reintento ante 429 (rate limit por minuto)."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY no está configurada en el servidor (Railway).")
 
+    tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}] if web_search else []
+    payload = {
+        "model": LISTING_MODEL,
+        "max_tokens": 4000,
+        "system": system_prompt,
+        "tools": tools,
+        "messages": [{"role": "user", "content": user_msg}],
+    }
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    last_detail = ""
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        for attempt in range(3):
+            try:
+                resp = await client.post(ANTHROPIC_MESSAGES_URL, json=payload, headers=headers)
+            except httpx.RequestError as e:
+                raise HTTPException(status_code=502, detail=f"No se pudo contactar a Anthropic: {e}")
+            if resp.status_code == 200:
+                data = resp.json()
+                return "\n".join(
+                    b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
+                )
+            last_detail = resp.text[:300]
+            if resp.status_code == 429 and attempt < 2:
+                try:
+                    wait = float(resp.headers.get("retry-after", "20"))
+                except (TypeError, ValueError):
+                    wait = 20.0
+                await asyncio.sleep(min(max(wait, 5.0), 35.0))
+                continue
+            break
+
+    if resp.status_code == 429 or "rate_limit" in last_detail:
+        raise HTTPException(
+            status_code=429,
+            detail=("Límite de Anthropic alcanzado (tu plan permite 30k tokens/min). "
+                    "Espera ~1 minuto e intenta de nuevo, o sube tu tier en Anthropic."),
+        )
+    raise HTTPException(status_code=resp.status_code, detail=f"Anthropic API error {resp.status_code}: {last_detail}")
+
+
+async def _run_data_aggregator(req, internal_data):
+    # SUB-AGENTE 1 — Recopilador de datos (web_search ACTIVADO).
     user_msg = f"""
 SOLICITUD DE ANÁLISIS — MODO: {req.mode.upper()}
 
@@ -1143,43 +1190,11 @@ PARÁMETROS DE BÚSQUEDA:
 
 Recopila datos de mercado para este perfil específico en Panamá.
 """
-
-    payload = {
-        "model": LISTING_MODEL,
-        "max_tokens": 4000,
-        "system": DATA_AGGREGATOR_PROMPT,
-        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-        "messages": [{"role": "user", "content": user_msg}],
-    }
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        try:
-            resp = await client.post(ANTHROPIC_MESSAGES_URL, json=payload, headers=headers)
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=502, detail=f"No se pudo contactar a Anthropic (recopilador): {e}")
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail=f"Anthropic API error {resp.status_code} (recopilador): {resp.text[:300]}",
-        )
-    data = resp.json()
-    return "\n".join(
-        block.get("text", "")
-        for block in data.get("content", [])
-        if block.get("type") == "text"
-    )
+    return await _anthropic_messages(DATA_AGGREGATOR_PROMPT, user_msg, web_search=True)
 
 
 async def _run_market_analyst(req, aggregator_result):
     # SUB-AGENTE 2 — Analista de mercado (tools=[], sin web_search).
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY no está configurada en el servidor (Railway).")
-
     user_msg = f"""
 MODO: {req.mode.upper()}
 PARÁMETROS ORIGINALES: {_format_request_params(req)}
@@ -1189,35 +1204,7 @@ DATOS DE MERCADO RECOPILADOS:
 
 Produce el análisis completo para este caso.
 """
-
-    payload = {
-        "model": LISTING_MODEL,
-        "max_tokens": 4000,
-        "system": MARKET_ANALYST_PROMPT,
-        "tools": [],
-        "messages": [{"role": "user", "content": user_msg}],
-    }
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        try:
-            resp = await client.post(ANTHROPIC_MESSAGES_URL, json=payload, headers=headers)
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=502, detail=f"No se pudo contactar a Anthropic (analista): {e}")
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail=f"Anthropic API error {resp.status_code} (analista): {resp.text[:300]}",
-        )
-    data = resp.json()
-    return "\n".join(
-        block.get("text", "")
-        for block in data.get("content", [])
-        if block.get("type") == "text"
-    )
+    return await _anthropic_messages(MARKET_ANALYST_PROMPT, user_msg, web_search=False)
 
 
 @app.post("/api/closings")

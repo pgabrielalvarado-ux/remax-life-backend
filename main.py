@@ -7,6 +7,7 @@ from typing import List, Optional
 import httpx
 from bs4 import BeautifulSoup
 import asyncio
+import html as html_escape_mod  # stdlib html.escape (evita choque con variables locales `html`)
 import io
 import os
 import base64
@@ -816,10 +817,17 @@ def init_db():
                 agent_name    TEXT,
                 mode          TEXT NOT NULL,
                 input_summary TEXT,
-                analysis_text TEXT NOT NULL
+                analysis_text TEXT NOT NULL,
+                sources       TEXT
             )
             """
         )
+        # Migración: la DB de producción ya existe en un Volume y
+        # CREATE TABLE IF NOT EXISTS no agrega columnas a tablas existentes.
+        try:
+            conn.execute("ALTER TABLE market_analyses ADD COLUMN sources TEXT")
+        except sqlite3.OperationalError:
+            pass  # la columna ya existe
 
 
 def _record_listing(user, form, photo_count, listing_text):
@@ -1112,23 +1120,56 @@ def _get_relevant_closings(req) -> str:
     return "\n".join(out)
 
 
-def _record_analysis(sub, agent_name, mode, req, text):
+def _record_analysis(sub, agent_name, mode, req, text, sources=None):
     with _db() as conn:
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO market_analyses
-                (created_at, agent_sub, agent_name, mode, input_summary, analysis_text)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (created_at, agent_sub, agent_name, mode, input_summary, analysis_text, sources)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now(timezone.utc).isoformat(),
                 sub, agent_name, mode, _format_request_params(req), text,
+                json.dumps(sources or [], ensure_ascii=False),
             ),
         )
+        return cur.lastrowid
+
+
+def _extract_web_sources(content_blocks, max_sources=25):
+    """Extrae URLs reales de los bloques web_search_tool_result de la respuesta.
+
+    Cada bloque trae "content" con una lista de items type=="web_search_result"
+    ({"url", "title", ...}). Si la búsqueda falló, "content" puede ser un dict
+    de error — se ignora defensivamente. Dedup por URL preservando orden.
+    """
+    sources, seen = [], set()
+    for block in content_blocks or []:
+        if not isinstance(block, dict) or block.get("type") != "web_search_tool_result":
+            continue
+        results = block.get("content")
+        if not isinstance(results, list):
+            continue  # dict de error u otro formato inesperado
+        for item in results:
+            if not isinstance(item, dict) or item.get("type") != "web_search_result":
+                continue
+            url = item.get("url")
+            if not url or not isinstance(url, str) or url in seen:
+                continue
+            seen.add(url)
+            sources.append({"url": url, "title": item.get("title") or url})
+            if len(sources) >= max_sources:
+                return sources
+    return sources
 
 
 async def _anthropic_messages(system_prompt, user_msg, web_search):
-    """Messages API de Anthropic con reintento ante 429 (rate limit por minuto)."""
+    """Messages API de Anthropic con reintento ante 429 (rate limit por minuto).
+
+    Devuelve {"text": <texto concatenado>, "sources": [{"url", "title"}, ...]}.
+    Las fuentes solo aparecen cuando web_search=True (bloques web_search_tool_result).
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY no está configurada en el servidor (Railway).")
@@ -1156,9 +1197,11 @@ async def _anthropic_messages(system_prompt, user_msg, web_search):
                 raise HTTPException(status_code=502, detail=f"No se pudo contactar a Anthropic: {e}")
             if resp.status_code == 200:
                 data = resp.json()
-                return "\n".join(
-                    b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
+                content_blocks = data.get("content", [])
+                text = "\n".join(
+                    b.get("text", "") for b in content_blocks if b.get("type") == "text"
                 )
+                return {"text": text, "sources": _extract_web_sources(content_blocks)}
             last_detail = resp.text[:300]
             if resp.status_code == 429 and attempt < 2:
                 try:
@@ -1190,7 +1233,8 @@ PARÁMETROS DE BÚSQUEDA:
 
 Recopila datos de mercado para este perfil específico en Panamá.
 """
-    return await _anthropic_messages(DATA_AGGREGATOR_PROMPT, user_msg, web_search=True)
+    result = await _anthropic_messages(DATA_AGGREGATOR_PROMPT, user_msg, web_search=True)
+    return result["text"], result["sources"]
 
 
 async def _run_market_analyst(req, aggregator_result):
@@ -1204,7 +1248,8 @@ DATOS DE MERCADO RECOPILADOS:
 
 Produce el análisis completo para este caso.
 """
-    return await _anthropic_messages(MARKET_ANALYST_PROMPT, user_msg, web_search=False)
+    result = await _anthropic_messages(MARKET_ANALYST_PROMPT, user_msg, web_search=False)
+    return result["text"]  # sin web_search las fuentes siempre vienen vacías
 
 
 @app.post("/api/closings")
@@ -1257,15 +1302,292 @@ async def analyze_market(req: MarketAnalysisRequest, user=Depends(require_auth))
     # STEP 1: cierres internos relevantes (DB)
     internal_data = _get_relevant_closings(req)
 
-    # STEP 2: SUB-AGENTE 1 — Recopilador de Datos (web_search)
-    aggregator_result = await _run_data_aggregator(req, internal_data)
+    # STEP 2: SUB-AGENTE 1 — Recopilador de Datos (web_search + fuentes reales)
+    aggregator_result, sources = await _run_data_aggregator(req, internal_data)
 
     # STEP 3: SUB-AGENTE 2 — Analista de Mercado (sin web_search)
     analysis_result = await _run_market_analyst(req, aggregator_result)
 
     # STEP 4: persistir y devolver
+    analysis_id = None
     try:
-        _record_analysis(sub, agent_name, req.mode, req, analysis_result)
+        analysis_id = _record_analysis(sub, agent_name, req.mode, req, analysis_result, sources)
     except Exception:
         pass  # nunca romper el análisis por un fallo de registro
-    return {"text": analysis_result, "data_context": aggregator_result}
+    return {
+        "text": analysis_result,
+        "data_context": aggregator_result,
+        "sources": sources,
+        "analysis_id": analysis_id,
+    }
+
+
+# ── Reporte ACM descargable (HTML brandeado) ────────────────────────────────
+
+_REPORT_SECTION_TITLES = {
+    "DATOS_MERCADO": "Datos de Mercado",
+    "ANALISIS": "Análisis",
+    "RECOMENDACION": "Recomendación",
+    "TABLA_COMPARATIVA": "Tabla Comparativa",
+}
+
+_REPORT_MODE_LABELS = {
+    "captacion": "Captación",
+    "comprador": "Comprador",
+    "inversion": "Inversión",
+}
+
+
+def _parse_analysis_sections(text: str):
+    """Divide analysis_text por marcadores ===NOMBRE=== → [(nombre, contenido), ...].
+
+    El texto antes del primer marcador (si existe) se devuelve como ("_INTRO", ...).
+    """
+    sections = []
+    parts = re.split(r"===\s*([A-Z_]+)\s*===", text or "")
+    intro = parts[0].strip()
+    if intro:
+        sections.append(("_INTRO", intro))
+    for i in range(1, len(parts) - 1, 2):
+        name = parts[i].strip()
+        content = parts[i + 1].strip()
+        if name in ("FIN_DATOS",):
+            continue
+        if content:
+            sections.append((name, content))
+    return sections
+
+
+def _report_table_html(content: str) -> str:
+    """Convierte un bloque con líneas separadas por | en una tabla HTML real."""
+    esc = html_escape_mod.escape
+    rows, extra = [], []
+    for line in content.splitlines():
+        if "|" in line:
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if all(re.fullmatch(r"[-—: ]*", c) for c in cells):
+                continue  # línea separadora estilo markdown
+            rows.append(cells)
+        elif line.strip():
+            extra.append(line.strip())
+    if not rows:
+        return f'<pre class="report-pre">{esc(content)}</pre>'
+
+    ncols = max(len(r) for r in rows)
+    header, body = rows[0], rows[1:]
+    thead = "".join(f"<th>{esc(c)}</th>" for c in header + [""] * (ncols - len(header)))
+    tbody = ""
+    for r in body:
+        cells = r + [""] * (ncols - len(r))
+        tbody += "<tr>" + "".join(f"<td>{esc(c)}</td>" for c in cells) + "</tr>"
+    extra_html = ""
+    if extra:
+        extra_html = '<p class="table-note">' + "<br/>".join(esc(l) for l in extra) + "</p>"
+    return (
+        f'<table class="report-table"><thead><tr>{thead}</tr></thead>'
+        f"<tbody>{tbody}</tbody></table>{extra_html}"
+    )
+
+
+def _build_market_report_html(rec: dict) -> str:
+    esc = html_escape_mod.escape
+
+    # Fecha DD/MM/YYYY
+    try:
+        fecha = datetime.fromisoformat(rec["created_at"]).strftime("%d/%m/%Y")
+    except Exception:
+        fecha = datetime.now().strftime("%d/%m/%Y")
+
+    agent_name = rec.get("agent_name") or rec.get("agent_sub") or "—"
+    mode_label = _REPORT_MODE_LABELS.get((rec.get("mode") or "").lower(), rec.get("mode") or "—")
+
+    param_lines = [l.strip() for l in (rec.get("input_summary") or "").splitlines() if l.strip()]
+    params_html = "".join(f'<div class="meta-param">{esc(l)}</div>' for l in param_lines) \
+        or '<div class="meta-param">(sin parámetros adicionales)</div>'
+
+    # Secciones del análisis
+    sections_html = ""
+    for name, content in _parse_analysis_sections(rec.get("analysis_text") or ""):
+        if name == "RECOMENDACION":
+            sections_html += f"""
+      <section class="report-section">
+        <h2 class="section-title">Recomendación</h2>
+        <div class="recommendation-card"><pre class="report-pre reco-pre">{esc(content)}</pre></div>
+      </section>"""
+        elif name == "TABLA_COMPARATIVA":
+            sections_html += f"""
+      <section class="report-section">
+        <h2 class="section-title">Tabla Comparativa</h2>
+        {_report_table_html(content)}
+      </section>"""
+        elif name == "_INTRO":
+            sections_html += f"""
+      <section class="report-section">
+        <pre class="report-pre">{esc(content)}</pre>
+      </section>"""
+        else:
+            title = _REPORT_SECTION_TITLES.get(name, name.replace("_", " ").title())
+            sections_html += f"""
+      <section class="report-section">
+        <h2 class="section-title">{esc(title)}</h2>
+        <pre class="report-pre">{esc(content)}</pre>
+      </section>"""
+
+    # Fuentes consultadas
+    try:
+        sources = json.loads(rec.get("sources") or "[]")
+    except (TypeError, ValueError):
+        sources = []
+    if not isinstance(sources, list):
+        sources = []
+    sources = [s for s in sources if isinstance(s, dict) and s.get("url")]
+    if sources:
+        items = ""
+        for s in sources:
+            url = esc(str(s["url"]), quote=True)
+            label = esc(str(s.get("title") or s["url"]))
+            items += f'<li><a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a></li>'
+        sources_html = f'<ol class="sources-list">{items}</ol>'
+    else:
+        sources_html = ('<p class="sources-empty">Análisis basado en datos internos '
+                        "RE/MAX Life y conocimiento de mercado.</p>")
+
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Análisis Comparativo de Mercado — RE/MAX Life</title>
+<style>
+@page {{size: 8.5in 11in; margin: 0.6in 0.55in;}}
+*{{box-sizing:border-box;margin:0;padding:0;}}
+body{{font-family:Helvetica,'Helvetica Neue',Arial,sans-serif;background:#fff;color:#222;
+  -webkit-print-color-adjust:exact;print-color-adjust:exact;line-height:1.55;}}
+.report{{max-width:8.5in;margin:0 auto;}}
+
+/* Header */
+.report-header{{background:#131936;color:#fff;padding:26px 34px;display:flex;
+  align-items:center;gap:22px;border-bottom:4px solid #CC0000;}}
+.header-text h1{{font-size:22px;font-weight:700;letter-spacing:0.02em;line-height:1.25;}}
+.header-text p{{font-size:12px;color:rgba(255,255,255,0.7);margin-top:4px;}}
+
+/* Metadatos */
+.meta-block{{background:#F4F6FB;border:1px solid #DDE3F0;border-left:4px solid #131936;
+  padding:16px 22px;margin:22px 34px 0;border-radius:4px;font-size:13px;}}
+.meta-row{{margin-bottom:4px;color:#333;}}
+.meta-row strong{{color:#131936;}}
+.meta-param{{color:#444;padding-left:12px;}}
+.meta-params-label{{margin-top:8px;font-weight:bold;color:#131936;}}
+
+/* Secciones */
+.report-body{{padding:6px 34px 0;}}
+.report-section{{margin-top:24px;page-break-inside:avoid;}}
+.section-title{{font-size:15px;font-weight:700;color:#131936;text-transform:uppercase;
+  letter-spacing:0.08em;border-bottom:2px solid #CC0000;padding-bottom:6px;margin-bottom:12px;}}
+.report-pre{{white-space:pre-wrap;word-wrap:break-word;font-family:inherit;
+  font-size:13px;color:#333;line-height:1.7;}}
+
+/* Recomendación destacada */
+.recommendation-card{{background:#131936;color:#fff;border-radius:8px;
+  padding:22px 26px;border-left:6px solid #CC0000;}}
+.reco-pre{{color:#fff;font-size:15px;line-height:1.8;}}
+
+/* Tabla comparativa */
+.report-table{{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:4px;}}
+.report-table th{{background:#131936;color:#fff;text-align:left;padding:9px 12px;
+  font-size:11.5px;text-transform:uppercase;letter-spacing:0.05em;}}
+.report-table td{{padding:8px 12px;border-bottom:1px solid #E2E7F2;color:#333;}}
+.report-table tbody tr:nth-child(even){{background:#F4F6FB;}}
+.table-note{{font-size:12px;color:#666;margin-top:8px;}}
+
+/* Fuentes */
+.sources-list{{padding-left:24px;font-size:12.5px;}}
+.sources-list li{{margin-bottom:6px;word-break:break-all;}}
+.sources-list a{{color:#131936;text-decoration:underline;}}
+.sources-empty{{font-size:13px;color:#555;font-style:italic;}}
+
+/* Footer */
+.report-footer{{margin-top:34px;border-top:1px solid #DDE3F0;background:#F7F8FC;
+  padding:18px 34px 22px;font-size:11px;color:#666;}}
+.report-footer .disclaimer{{margin-bottom:8px;line-height:1.6;}}
+.report-footer .contact{{color:#131936;font-weight:bold;}}
+
+@media print{{
+  body{{background:#fff;}}
+  .report{{max-width:none;}}
+  .no-print{{display:none!important;}}
+  .report-header,.recommendation-card,.report-table th{{
+    -webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+}}
+</style>
+</head>
+<body>
+<div class="report">
+  <header class="report-header">
+    {LOGO_IMG_DARK}
+    <div class="header-text">
+      <h1>Análisis Comparativo de Mercado</h1>
+      <p>RE/MAX Life — La primera franquicia RE/MAX en Panamá</p>
+    </div>
+  </header>
+
+  <div class="meta-block">
+    <div class="meta-row"><strong>Fecha:</strong> {esc(fecha)}</div>
+    <div class="meta-row"><strong>Preparado por:</strong> {esc(agent_name)}</div>
+    <div class="meta-row"><strong>Modo de análisis:</strong> {esc(mode_label)}</div>
+    <div class="meta-params-label">Parámetros del análisis:</div>
+    {params_html}
+  </div>
+
+  <div class="report-body">
+    {sections_html}
+
+    <section class="report-section">
+      <h2 class="section-title">Fuentes consultadas</h2>
+      {sources_html}
+    </section>
+  </div>
+
+  <footer class="report-footer">
+    <p class="disclaimer">Este documento es una estimación de mercado elaborada con herramientas
+    de análisis de RE/MAX Life y no constituye un avalúo formal.</p>
+    <p class="contact">Info@remax-life.com.pa &nbsp;·&nbsp; +507 391-9865</p>
+  </footer>
+</div>
+</body>
+</html>"""
+
+
+@app.get("/api/market-report/{analysis_id}")
+def market_report(analysis_id: int, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM market_analyses WHERE id = ?", (analysis_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Análisis no encontrado.")
+    rec = dict(row)
+    if not _is_admin(sub) and rec.get("agent_sub") != sub:
+        raise HTTPException(status_code=404, detail="Análisis no encontrado.")
+
+    doc = _build_market_report_html(rec)
+
+    # Nombre de archivo: zona (del input_summary) o id, + fecha
+    zona = ""
+    for line in (rec.get("input_summary") or "").splitlines():
+        if line.lower().startswith("zona"):
+            zona = line.split(":", 1)[-1].strip()
+            break
+    slug = re.sub(r"[^A-Za-z0-9-]+", "-", zona).strip("-")[:40] or str(rec["id"])
+    try:
+        fecha_file = datetime.fromisoformat(rec["created_at"]).strftime("%Y-%m-%d")
+    except Exception:
+        fecha_file = datetime.now().strftime("%Y-%m-%d")
+    filename = f"ACM_REMAX-Life_{slug}_{fecha_file}.html"
+
+    return StreamingResponse(
+        io.BytesIO(doc.encode("utf-8")),
+        media_type="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

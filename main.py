@@ -1455,51 +1455,211 @@ def _report_table_html(content: str) -> str:
     )
 
 
+_REPORT_MONTHS_ES = [
+    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+]
+
+# CSS del reporte A4 (sistema "Internacional" — ver design-tokens.json del handoff).
+# String normal (no f-string) para no duplicar llaves.
+_REPORT_CSS = """
+*{box-sizing:border-box;margin:0;padding:0}
+@page{size:A4;margin:0}
+html,body{background:#F8F7F5}
+body{font-family:'Archivo','Helvetica Neue',Helvetica,Arial,sans-serif;color:#1C1B19;
+  line-height:1.6;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.num{font-variant-numeric:tabular-nums}
+
+/* Página A4 — 210×297mm (794×1123px @96dpi) */
+.page{width:210mm;min-height:297mm;margin:0 auto;background:#fff;position:relative;
+  display:flex;flex-direction:column;padding:64px 64px 36px;
+  break-after:page;page-break-after:always}
+.page:last-of-type{break-after:auto;page-break-after:auto}
+@media screen{.page{margin:24px auto;outline:1px solid #E5E2DD}}
+@media print{html,body{background:#fff}.page{margin:0;outline:none}}
+
+/* ── Página 1 · Portada ── */
+.cover{background:#131936;color:#fff;height:297mm;overflow:hidden;padding:64px}
+.cover-grid{position:absolute;inset:0;
+  background-image:linear-gradient(rgba(205,199,189,0.05) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(205,199,189,0.05) 1px,transparent 1px);
+  background-size:72px 72px}
+.cover-inner{position:relative;flex:1;display:flex;flex-direction:column}
+.cover-top{display:flex;justify-content:space-between;align-items:center}
+.logo-chip{height:28px;background:#fff;border-radius:4px;padding:7px 11px}
+.cover-tag{font-size:10px;letter-spacing:0.22em;color:#CDC7BD}
+.cover-mid{flex:1;display:flex;flex-direction:column;justify-content:center}
+.cover-rule{width:44px;height:3px;background:#CC0000;margin-bottom:30px}
+.cover-kicker{font-size:13px;font-weight:600;letter-spacing:0.24em;color:#CDC7BD;margin-bottom:20px}
+.cover-title{font-size:52px;font-weight:700;letter-spacing:-0.03em;line-height:1.04;
+  color:#fff;overflow-wrap:break-word}
+.cover-meta{font-size:14px;color:rgba(255,255,255,0.65);margin-top:22px}
+.cover-bottom{display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;
+  border-top:1px solid rgba(205,199,189,0.25);padding-top:24px}
+.cover-cell-label{font-size:9.5px;font-weight:600;letter-spacing:0.18em;
+  color:rgba(205,199,189,0.7);margin-bottom:7px}
+.cover-cell-value{font-size:14px;font-weight:600;color:#fff;overflow-wrap:break-word}
+
+/* ── Header de documento (páginas 2 y 3) ── */
+.doc-header{display:flex;justify-content:space-between;align-items:baseline;gap:16px;
+  border-bottom:2px solid #131936;padding-bottom:14px;margin-bottom:24px}
+.doc-title{font-size:20px;font-weight:700;letter-spacing:-0.02em;color:#131936}
+.doc-kicker{font-size:9.5px;font-weight:600;letter-spacing:0.18em;color:#003DA5;
+  text-transform:uppercase;text-align:right}
+
+/* Banda de parámetros */
+.band{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:#E5E2DD;
+  border:1px solid #E5E2DD;margin-bottom:26px;break-inside:avoid;page-break-inside:avoid}
+.band-cell{background:#fff;padding:14px 16px}
+.band-label{font-size:8.5px;font-weight:600;letter-spacing:0.14em;color:#9B978F;
+  text-transform:uppercase;margin-bottom:7px}
+.band-value{font-size:12.5px;font-weight:600;color:#131936;line-height:1.35;overflow-wrap:break-word}
+
+/* Secciones numeradas — numeral fantasma + regla roja */
+.sec{display:grid;grid-template-columns:84px 1fr;gap:20px;padding:16px 0}
+.sec + .sec{border-top:1px solid #E5E2DD}
+.sec-num{font-size:20px;font-weight:700;color:#D9D5CE;line-height:1}
+.sec-rule{width:20px;height:2px;background:#CC0000;margin-top:8px}
+.sec-title{font-size:13.5px;font-weight:700;color:#131936;margin-bottom:5px}
+.sec-pre,.report-pre{white-space:pre-wrap;overflow-wrap:break-word;font-family:inherit;
+  font-size:11.5px;color:#605D57;line-height:1.65}
+.intro{padding-bottom:16px}
+
+/* Panel navy de recomendación */
+.reco{background:#131936;padding:24px 28px;margin-top:10px;break-inside:avoid;page-break-inside:avoid}
+.reco-label{font-size:8.5px;font-weight:600;letter-spacing:0.18em;color:rgba(255,255,255,0.55);margin-bottom:10px}
+.reco-pre{white-space:pre-wrap;overflow-wrap:break-word;font-family:inherit;
+  font-size:11.5px;color:rgba(255,255,255,0.88);line-height:1.65}
+
+/* Tabla comparativa — cifras tabular-nums a la derecha */
+.report-table{width:100%;border-collapse:collapse;border:1px solid #E5E2DD;
+  margin-bottom:8px;font-variant-numeric:tabular-nums}
+.report-table th{background:#F8F7F5;border-bottom:1px solid #E5E2DD;padding:9px 16px;
+  font-size:8.5px;font-weight:600;letter-spacing:0.14em;color:#9B978F;
+  text-transform:uppercase;text-align:right}
+.report-table th:first-child{text-align:left}
+.report-table td{padding:10px 16px;border-bottom:1px solid #E5E2DD;font-size:11px;
+  color:#1C1B19;text-align:right}
+.report-table td:first-child{text-align:left;font-weight:600;color:#131936}
+.report-table tbody tr:last-child td{border-bottom:none}
+.table-note{font-size:9.5px;color:#9B978F;margin:2px 0 26px;line-height:1.6;
+  font-variant-numeric:tabular-nums}
+
+/* Fuentes numeradas */
+.src-kicker{font-size:9.5px;font-weight:600;letter-spacing:0.18em;color:#003DA5;
+  text-transform:uppercase;margin:18px 0 12px}
+.src-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 28px;margin-bottom:26px}
+.src{display:flex;gap:8px;font-size:10px;color:#605D57;align-items:baseline;min-width:0}
+.src-num{color:#131936;font-weight:700;font-size:9px;flex:none}
+.src a{color:#003DA5;text-decoration:none;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;min-width:0}
+.sources-empty{font-size:10.5px;color:#605D57;font-style:italic;margin-bottom:26px}
+
+/* Aviso legal */
+.disclaimer{background:#F8F7F5;border:1px solid #E5E2DD;padding:14px 18px;
+  font-size:9.5px;color:#605D57;line-height:1.65;margin-bottom:24px}
+.disclaimer strong{color:#131936}
+
+/* Footer con paginación */
+.pg-footer{margin-top:auto;display:flex;justify-content:space-between;align-items:center;
+  font-size:9.5px;letter-spacing:0.12em;color:#9B978F;
+  border-top:1px solid #E5E2DD;padding-top:12px}
+"""
+
+
 def _build_market_report_html(rec: dict) -> str:
     esc = html_escape_mod.escape
 
-    # Fecha DD/MM/YYYY
+    # Fecha "10 de junio, 2026" (independiente del locale)
     try:
-        fecha = datetime.fromisoformat(rec["created_at"]).strftime("%d/%m/%Y")
+        dt = datetime.fromisoformat(rec["created_at"])
     except Exception:
-        fecha = datetime.now().strftime("%d/%m/%Y")
+        dt = datetime.now()
+    fecha = f"{dt.day} de {_REPORT_MONTHS_ES[dt.month - 1]}, {dt.year}"
 
     agent_name = rec.get("agent_name") or rec.get("agent_sub") or "—"
     mode_label = _REPORT_MODE_LABELS.get((rec.get("mode") or "").lower(), rec.get("mode") or "—")
 
-    param_lines = [l.strip() for l in (rec.get("input_summary") or "").splitlines() if l.strip()]
-    params_html = "".join(f'<div class="meta-param">{esc(l)}</div>' for l in param_lines) \
-        or '<div class="meta-param">(sin parámetros adicionales)</div>'
+    # Parámetros del análisis (input_summary → pares "Etiqueta: valor")
+    params = []
+    for line in (rec.get("input_summary") or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            k, v = line.split(":", 1)
+            params.append((k.strip(), v.strip()))
+        else:
+            params.append(("", line))
+    pdict = {k.lower(): v for k, v in params if k and v}
 
-    # Secciones del análisis
-    sections_html = ""
+    # Título de portada: edificio y/o zona
+    edificio = pdict.get("edificio", "")
+    zona = (pdict.get("zona", "") or pdict.get("zonas de interés", "")
+            or pdict.get("zonas a comparar", ""))
+    title_main = edificio or zona or "Mercado inmobiliario"
+    title_sub = zona if (edificio and zona and zona.lower() != edificio.lower()) else ""
+    cover_title = esc(title_main) + (f"<br>{esc(title_sub)}" if title_sub else "")
+    kicker_doc = f"{title_main} · {zona}" if title_sub else title_main
+
+    # Línea de características de la portada (Apartamento · Venta · 136 m² · …)
+    cover_bits = []
+    for label, value in params:
+        low = label.lower()
+        if not value or low in ("edificio", "zona"):
+            continue
+        if low == "m²":
+            cover_bits.append(f"{value} m²")
+        elif low == "habitaciones":
+            cover_bits.append(f"{value} recámaras")
+        elif low == "baños":
+            cover_bits.append(f"{value} baños")
+        elif low == "parqueos":
+            cover_bits.append(f"{value} parqueos")
+        elif low in ("tipo", "operación", "operacion", "tipo de propiedad",
+                     "tipo de inversión", "tipo de inversion"):
+            cover_bits.append(value)
+    cover_meta_html = (f'<div class="cover-meta num">{esc(" · ".join(cover_bits))}</div>'
+                       if cover_bits else "")
+
+    # Banda de parámetros (página 2) — celdas con hairline, relleno a múltiplo de 4
+    if params:
+        band_cells = "".join(
+            f'<div class="band-cell"><div class="band-label">{esc(k) if k else "&nbsp;"}</div>'
+            f'<div class="band-value num">{esc(v)}</div></div>'
+            for k, v in params
+        )
+        band_cells += '<div class="band-cell"></div>' * ((-len(params)) % 4)
+    else:
+        band_cells = ('<div class="band-cell"><div class="band-value">(sin parámetros '
+                      'adicionales)</div></div>' + '<div class="band-cell"></div>' * 3)
+
+    # Secciones del análisis → página 2 (numeradas + recomendación) y página 3 (tabla)
+    intro_html, numbered_html, reco_html, table_html = "", "", "", ""
+    sec_n = 0
     for name, content in _parse_analysis_sections(rec.get("analysis_text") or ""):
         if name == "RECOMENDACION":
-            sections_html += f"""
-      <section class="report-section">
-        <h2 class="section-title">Recomendación</h2>
-        <div class="recommendation-card"><pre class="report-pre reco-pre">{esc(content)}</pre></div>
-      </section>"""
+            reco_html = (
+                '<div class="reco"><div class="reco-label">RECOMENDACIÓN</div>'
+                f'<pre class="reco-pre">{esc(content)}</pre></div>'
+            )
         elif name == "TABLA_COMPARATIVA":
-            sections_html += f"""
-      <section class="report-section">
-        <h2 class="section-title">Tabla Comparativa</h2>
-        {_report_table_html(content)}
-      </section>"""
+            table_html = _report_table_html(content)
         elif name == "_INTRO":
-            sections_html += f"""
-      <section class="report-section">
-        <pre class="report-pre">{esc(content)}</pre>
-      </section>"""
+            intro_html = f'<pre class="report-pre intro">{esc(content)}</pre>'
         else:
+            sec_n += 1
             title = _REPORT_SECTION_TITLES.get(name, name.replace("_", " ").title())
-            sections_html += f"""
-      <section class="report-section">
-        <h2 class="section-title">{esc(title)}</h2>
-        <pre class="report-pre">{esc(content)}</pre>
-      </section>"""
+            numbered_html += f"""
+      <div class="sec">
+        <div><div class="sec-num num">{sec_n:02d}</div><div class="sec-rule"></div></div>
+        <div>
+          <div class="sec-title">{esc(title)}</div>
+          <pre class="sec-pre">{esc(content)}</pre>
+        </div>
+      </div>"""
 
-    # Fuentes consultadas
+    # Fuentes consultadas (links reales, clicables)
     try:
         sources = json.loads(rec.get("sources") or "[]")
     except (TypeError, ValueError):
@@ -1509,14 +1669,25 @@ def _build_market_report_html(rec: dict) -> str:
     sources = [s for s in sources if isinstance(s, dict) and s.get("url")]
     if sources:
         items = ""
-        for s in sources:
+        for i, s in enumerate(sources, 1):
             url = esc(str(s["url"]), quote=True)
             label = esc(str(s.get("title") or s["url"]))
-            items += f'<li><a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a></li>'
-        sources_html = f'<ol class="sources-list">{items}</ol>'
+            items += (f'<div class="src"><span class="src-num num">{i:02d}</span>'
+                      f'<a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a></div>')
+        sources_html = f'<div class="src-grid">{items}</div>'
+        sources_kicker = f"FUENTES CONSULTADAS · {len(sources)}"
     else:
         sources_html = ('<p class="sources-empty">Análisis basado en datos internos '
                         "RE/MAX Life y conocimiento de mercado.</p>")
+        sources_kicker = "FUENTES CONSULTADAS"
+
+    page3_title = "Comparables de mercado" if table_html else "Fuentes consultadas"
+    kicker_p3 = f"{zona or title_main} · {_REPORT_MONTHS_ES[dt.month - 1]} {dt.year}"
+    logo_chip = f'<img src="{LOGO_DATA_URI}" class="logo-chip" alt="RE/MAX Life" />'
+
+    def footer(p: int) -> str:
+        return ('<footer class="pg-footer"><span>RE/MAX LIFE · ANÁLISIS COMPARATIVO '
+                f'DE MERCADO</span><span class="num">{p} / 3</span></footer>')
 
     return f"""<!DOCTYPE html>
 <html lang="es">
@@ -1524,102 +1695,66 @@ def _build_market_report_html(rec: dict) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Análisis Comparativo de Mercado — RE/MAX Life</title>
-<style>
-@page {{size: 8.5in 11in; margin: 0.6in 0.55in;}}
-*{{box-sizing:border-box;margin:0;padding:0;}}
-body{{font-family:Helvetica,'Helvetica Neue',Arial,sans-serif;background:#fff;color:#222;
-  -webkit-print-color-adjust:exact;print-color-adjust:exact;line-height:1.55;}}
-.report{{max-width:8.5in;margin:0 auto;}}
-
-/* Header */
-.report-header{{background:#131936;color:#fff;padding:26px 34px;display:flex;
-  align-items:center;gap:22px;border-bottom:4px solid #CC0000;}}
-.header-text h1{{font-size:22px;font-weight:700;letter-spacing:0.02em;line-height:1.25;}}
-.header-text p{{font-size:12px;color:rgba(255,255,255,0.7);margin-top:4px;}}
-
-/* Metadatos */
-.meta-block{{background:#F4F6FB;border:1px solid #DDE3F0;border-left:4px solid #131936;
-  padding:16px 22px;margin:22px 34px 0;border-radius:4px;font-size:13px;}}
-.meta-row{{margin-bottom:4px;color:#333;}}
-.meta-row strong{{color:#131936;}}
-.meta-param{{color:#444;padding-left:12px;}}
-.meta-params-label{{margin-top:8px;font-weight:bold;color:#131936;}}
-
-/* Secciones */
-.report-body{{padding:6px 34px 0;}}
-.report-section{{margin-top:24px;page-break-inside:avoid;}}
-.section-title{{font-size:15px;font-weight:700;color:#131936;text-transform:uppercase;
-  letter-spacing:0.08em;border-bottom:2px solid #CC0000;padding-bottom:6px;margin-bottom:12px;}}
-.report-pre{{white-space:pre-wrap;word-wrap:break-word;font-family:inherit;
-  font-size:13px;color:#333;line-height:1.7;}}
-
-/* Recomendación destacada */
-.recommendation-card{{background:#131936;color:#fff;border-radius:8px;
-  padding:22px 26px;border-left:6px solid #CC0000;}}
-.reco-pre{{color:#fff;font-size:15px;line-height:1.8;}}
-
-/* Tabla comparativa */
-.report-table{{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:4px;}}
-.report-table th{{background:#131936;color:#fff;text-align:left;padding:9px 12px;
-  font-size:11.5px;text-transform:uppercase;letter-spacing:0.05em;}}
-.report-table td{{padding:8px 12px;border-bottom:1px solid #E2E7F2;color:#333;}}
-.report-table tbody tr:nth-child(even){{background:#F4F6FB;}}
-.table-note{{font-size:12px;color:#666;margin-top:8px;}}
-
-/* Fuentes */
-.sources-list{{padding-left:24px;font-size:12.5px;}}
-.sources-list li{{margin-bottom:6px;word-break:break-all;}}
-.sources-list a{{color:#131936;text-decoration:underline;}}
-.sources-empty{{font-size:13px;color:#555;font-style:italic;}}
-
-/* Footer */
-.report-footer{{margin-top:34px;border-top:1px solid #DDE3F0;background:#F7F8FC;
-  padding:18px 34px 22px;font-size:11px;color:#666;}}
-.report-footer .disclaimer{{margin-bottom:8px;line-height:1.6;}}
-.report-footer .contact{{color:#131936;font-weight:bold;}}
-
-@media print{{
-  body{{background:#fff;}}
-  .report{{max-width:none;}}
-  .no-print{{display:none!important;}}
-  .report-header,.recommendation-card,.report-table th{{
-    -webkit-print-color-adjust:exact;print-color-adjust:exact;}}
-}}
-</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>{_REPORT_CSS}</style>
 </head>
 <body>
-<div class="report">
-  <header class="report-header">
-    {LOGO_IMG_DARK}
-    <div class="header-text">
-      <h1>Análisis Comparativo de Mercado</h1>
-      <p>RE/MAX Life — La primera franquicia RE/MAX en Panamá</p>
+
+<!-- Página 1 · Portada -->
+<div class="page cover">
+  <div class="cover-grid"></div>
+  <div class="cover-inner">
+    <div class="cover-top">
+      {logo_chip}
+      <span class="cover-tag num">PANAMÁ · {dt.year}</span>
     </div>
-  </header>
-
-  <div class="meta-block">
-    <div class="meta-row"><strong>Fecha:</strong> {esc(fecha)}</div>
-    <div class="meta-row"><strong>Preparado por:</strong> {esc(agent_name)}</div>
-    <div class="meta-row"><strong>Modo de análisis:</strong> {esc(mode_label)}</div>
-    <div class="meta-params-label">Parámetros del análisis:</div>
-    {params_html}
+    <div class="cover-mid">
+      <div class="cover-rule"></div>
+      <div class="cover-kicker">ANÁLISIS COMPARATIVO<br>DE MERCADO</div>
+      <div class="cover-title">{cover_title}</div>
+      {cover_meta_html}
+    </div>
+    <div class="cover-bottom">
+      <div><div class="cover-cell-label">PREPARADO POR</div>
+        <div class="cover-cell-value num">{esc(agent_name)}</div></div>
+      <div><div class="cover-cell-label">FECHA</div>
+        <div class="cover-cell-value num">{esc(fecha)}</div></div>
+      <div><div class="cover-cell-label">MODO DE ANÁLISIS</div>
+        <div class="cover-cell-value num">{esc(mode_label)}</div></div>
+    </div>
   </div>
-
-  <div class="report-body">
-    {sections_html}
-
-    <section class="report-section">
-      <h2 class="section-title">Fuentes consultadas</h2>
-      {sources_html}
-    </section>
-  </div>
-
-  <footer class="report-footer">
-    <p class="disclaimer">Este documento es una estimación de mercado elaborada con herramientas
-    de análisis de RE/MAX Life y no constituye un avalúo formal.</p>
-    <p class="contact">Info@remax-life.com.pa &nbsp;·&nbsp; +507 391-9865</p>
-  </footer>
 </div>
+
+<!-- Página 2 · Resumen ejecutivo + análisis + recomendación -->
+<div class="page">
+  <header class="doc-header">
+    <div class="doc-title">Resumen ejecutivo</div>
+    <div class="doc-kicker">{esc(kicker_doc)}</div>
+  </header>
+  <div class="band">{band_cells}</div>
+  {intro_html}
+  {numbered_html}
+  {reco_html}
+  {footer(2)}
+</div>
+
+<!-- Página 3 · Comparables + fuentes + aviso -->
+<div class="page">
+  <header class="doc-header">
+    <div class="doc-title">{esc(page3_title)}</div>
+    <div class="doc-kicker">{esc(kicker_p3)}</div>
+  </header>
+  {table_html}
+  <div class="src-kicker">{esc(sources_kicker)}</div>
+  {sources_html}
+  <div class="disclaimer"><strong>Aviso.</strong> Este documento es una estimación de mercado
+  elaborada con herramientas de análisis de RE/MAX Life y no constituye un avalúo formal.
+  RE/MAX Life — La primera franquicia RE/MAX en Panamá · Info@remax-life.com.pa · +507 391-9865.</div>
+  {footer(3)}
+</div>
+
 </body>
 </html>"""
 

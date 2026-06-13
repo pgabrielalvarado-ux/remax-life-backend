@@ -13,6 +13,7 @@ import os
 import base64
 import re
 import json
+import secrets
 import sqlite3
 import jwt
 import bcrypt
@@ -42,6 +43,15 @@ app.add_middleware(
 USERS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
 JWT_ALG = "HS256"
 TOKEN_DAYS = 7
+
+# ── SSO hacia el módulo de Comisiones (portal Altia) ───────────────────────
+# El Hub actúa como proveedor de identidad: firma un token de corta vida con un
+# secreto COMPARTIDO con el backend de Altia (SSO_SHARED_SECRET) y manda al
+# agente al portal de comisiones ya autenticado, sin segundo login.
+SSO_TTL_SECONDS = 90
+COMISIONES_SSO_URL = os.environ.get(
+    "COMISIONES_SSO_URL", "https://altia-portal.vercel.app/es/agentes/sso"
+)
 _bearer = HTTPBearer(auto_error=False)
 
 
@@ -746,6 +756,38 @@ def login(req: LoginRequest):
 @app.get("/api/me")
 def me(user=Depends(require_auth)):
     return {"sub": user.get("sub"), "name": user.get("name")}
+
+
+@app.post("/api/sso/comisiones")
+def sso_comisiones(user=Depends(require_auth)):
+    """Emite un token de handoff (90s) para entrar al módulo de Comisiones de
+    Altia sin segundo login. El agente ya está autenticado en el Hub; aquí
+    firmamos su email con el secreto compartido y devolvemos la URL destino."""
+    secret = os.environ.get("SSO_SHARED_SECRET")
+    if not secret:
+        raise HTTPException(status_code=500, detail="SSO_SHARED_SECRET no está configurado en el servidor.")
+    sub = (user.get("sub") or "").strip().lower()
+    u = _load_users().get(sub)
+    if not u:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    email = (u.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=409, detail="Tu usuario no tiene correo configurado para Comisiones. Contacta al administrador.")
+    now = datetime.now(timezone.utc)
+    handoff = jwt.encode(
+        {
+            "email": email,
+            "name": u.get("name", sub),
+            "purpose": "comisiones-sso",
+            "iss": "remax-hub",
+            "jti": secrets.token_hex(16),
+            "iat": now,
+            "exp": now + timedelta(seconds=SSO_TTL_SECONDS),
+        },
+        secret,
+        algorithm=JWT_ALG,
+    )
+    return {"url": f"{COMISIONES_SSO_URL}#token={handoff}"}
 
 
 # ── Registro de listings (historial en SQLite) ─────────────────────────────

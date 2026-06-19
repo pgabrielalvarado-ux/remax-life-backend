@@ -1,16 +1,23 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import httpx
 from bs4 import BeautifulSoup
 import asyncio
+import html as html_escape_mod  # stdlib html.escape (evita choque con variables locales `html`)
 import io
 import os
 import base64
 import re
-from datetime import datetime
+import json
+import secrets
+import sqlite3
+import jwt
+import bcrypt
+from datetime import datetime, timedelta, timezone
 
 app = FastAPI(title="RE/MAX Life - Property PDF Generator")
 
@@ -25,6 +32,61 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Autenticación (JWT) ────────────────────────────────────────────────────
+# Login server-side: solo agentes con usuario + contraseña válidos obtienen un
+# token JWT (7 días). Los endpoints sensibles lo exigen. El secreto de firma
+# vive en la variable de entorno JWT_SECRET (Railway). Las contraseñas se
+# guardan hasheadas con bcrypt en users.json (ver add_user.py).
+
+USERS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
+JWT_ALG = "HS256"
+TOKEN_DAYS = 7
+
+# ── SSO hacia el módulo de Comisiones (portal Altia) ───────────────────────
+# El Hub actúa como proveedor de identidad: firma un token de corta vida con un
+# secreto COMPARTIDO con el backend de Altia (SSO_SHARED_SECRET) y manda al
+# agente al portal de comisiones ya autenticado, sin segundo login.
+SSO_TTL_SECONDS = 90
+COMISIONES_SSO_URL = os.environ.get(
+    "COMISIONES_SSO_URL", "https://altia-portal.vercel.app/es/agentes/sso"
+)
+_bearer = HTTPBearer(auto_error=False)
+
+
+def _load_users() -> dict:
+    try:
+        with open(USERS_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data.get("agents", data)  # admite {"agents": {...}} o {...}
+    except FileNotFoundError:
+        return {}
+
+
+def _jwt_secret() -> str:
+    secret = os.environ.get("JWT_SECRET")
+    if not secret:
+        raise HTTPException(status_code=500, detail="JWT_SECRET no está configurado en el servidor.")
+    return secret
+
+
+def require_auth(creds: HTTPAuthorizationCredentials = Depends(_bearer)):
+    if creds is None or not creds.credentials:
+        raise HTTPException(status_code=401, detail="No autenticado.")
+    try:
+        payload = jwt.decode(creds.credentials, _jwt_secret(), algorithms=[JWT_ALG])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Sesión expirada. Inicia sesión de nuevo.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Token inválido.")
+    return payload
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 
 HEADERS = {
     "User-Agent": (
@@ -442,13 +504,13 @@ def health():
 
 
 @app.post("/scrape")
-async def scrape_property(url: str):
+async def scrape_property(url: str, user=Depends(require_auth)):
     data = await scrape_encuentra24(url)
     return data
 
 
 @app.post("/generate")
-async def generate_pdf(req: PropertyRequest):
+async def generate_pdf(req: PropertyRequest, user=Depends(require_auth)):
     if not req.urls:
         raise HTTPException(status_code=400, detail="Se requiere al menos un URL.")
     if len(req.urls) > 10:
@@ -479,6 +541,11 @@ async def generate_pdf(req: PropertyRequest):
 
 LISTING_MODEL = "claude-sonnet-4-20250514"
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+
+# Tarifas de claude-sonnet-4 (para estimar gasto por llamada)
+USD_PER_MTOK_INPUT = 3.0
+USD_PER_MTOK_OUTPUT = 15.0
+USD_PER_1K_WEB_SEARCHES = 10.0
 
 LISTING_SYSTEM_PROMPT = """Eres el Agente de Listings RE/MAX Life, un sistema de IA especializado en bienes raíces en Panamá. Tu misión es tomar la información de una propiedad captada por un agente y producir un listing profesional, bilingüe y listo para publicar en portales internacionales.
 
@@ -576,7 +643,7 @@ class ListingRequest(BaseModel):
 
 
 @app.post("/api/generate-listing")
-async def generate_listing(req: ListingRequest):
+async def generate_listing(req: ListingRequest, user=Depends(require_auth)):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(
@@ -649,9 +716,1213 @@ async def generate_listing(req: ListingRequest):
         )
 
     data = resp.json()
+    _record_usage(user, "listing", data.get("usage", {}))
     full_text = "\n".join(
         block.get("text", "")
         for block in data.get("content", [])
         if block.get("type") == "text"
     )
+    try:
+        _record_listing(user, f, len(req.photos), full_text)
+    except Exception:
+        pass  # nunca romper la generación por un fallo de registro
     return {"text": full_text}
+
+
+# ── Endpoints de autenticación ─────────────────────────────────────────────
+
+@app.post("/api/login")
+def login(req: LoginRequest):
+    users = _load_users()
+    key = req.username.strip().lower()
+    u = users.get(key)
+    ok = False
+    if u and u.get("hash"):
+        try:
+            ok = bcrypt.checkpw(req.password.encode("utf-8"), u["hash"].encode("utf-8"))
+        except ValueError:
+            ok = False
+    if not ok:
+        raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos.")
+    exp = datetime.now(timezone.utc) + timedelta(days=TOKEN_DAYS)
+    token = jwt.encode(
+        {"sub": key, "name": u.get("name", key), "exp": exp},
+        _jwt_secret(),
+        algorithm=JWT_ALG,
+    )
+    return {"token": token, "name": u.get("name", key)}
+
+
+@app.get("/api/me")
+def me(user=Depends(require_auth)):
+    return {"sub": user.get("sub"), "name": user.get("name")}
+
+
+@app.post("/api/sso/comisiones")
+def sso_comisiones(user=Depends(require_auth)):
+    """Emite un token de handoff (90s) para entrar al módulo de Comisiones de
+    Altia sin segundo login. El agente ya está autenticado en el Hub; aquí
+    firmamos su email con el secreto compartido y devolvemos la URL destino."""
+    secret = os.environ.get("SSO_SHARED_SECRET")
+    if not secret:
+        raise HTTPException(status_code=500, detail="SSO_SHARED_SECRET no está configurado en el servidor.")
+    sub = (user.get("sub") or "").strip().lower()
+    u = _load_users().get(sub)
+    if not u:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    email = (u.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=409, detail="Tu usuario no tiene correo configurado para Comisiones. Contacta al administrador.")
+    now = datetime.now(timezone.utc)
+    handoff = jwt.encode(
+        {
+            "email": email,
+            "name": u.get("name", sub),
+            "purpose": "comisiones-sso",
+            "iss": "remax-hub",
+            "jti": secrets.token_hex(16),
+            "iat": now,
+            "exp": now + timedelta(seconds=SSO_TTL_SECONDS),
+        },
+        secret,
+        algorithm=JWT_ALG,
+    )
+    return {"url": f"{COMISIONES_SSO_URL}#token={handoff}"}
+
+
+# ── Registro de listings (historial en SQLite) ─────────────────────────────
+# Persistencia en DATA_DIR (en Railway, un Volume montado en /data para que
+# sobreviva a los redeploys). Localmente cae junto al backend.
+
+DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(DATA_DIR, "listings.db")
+
+
+def _db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with _db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS listings (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at    TEXT NOT NULL,
+                agent_sub     TEXT NOT NULL,
+                agent_name    TEXT,
+                operacion     TEXT,
+                tipo          TEXT,
+                edificio      TEXT,
+                zona          TEXT,
+                piso          TEXT,
+                precio        TEXT,
+                m2            TEXT,
+                habitaciones  TEXT,
+                banos         TEXT,
+                parqueos      TEXT,
+                amueblado     TEXT,
+                photo_count   INTEGER,
+                listing_text  TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_listings_agent ON listings(agent_sub)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_closings (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at    TEXT NOT NULL,
+                agent_sub     TEXT NOT NULL,
+                edificio      TEXT,
+                zona          TEXT NOT NULL,
+                tipo          TEXT NOT NULL,
+                operacion     TEXT NOT NULL,
+                m2            REAL,
+                precio_cierre REAL NOT NULL,
+                fecha_cierre  TEXT NOT NULL,
+                piso          TEXT,
+                habitaciones  TEXT,
+                banos         TEXT,
+                parqueos      TEXT,
+                finca         TEXT,
+                notas         TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_closings_zona ON market_closings(zona)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_closings_edificio ON market_closings(edificio)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_closings_agent ON market_closings(agent_sub)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_analyses (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at    TEXT NOT NULL,
+                agent_sub     TEXT NOT NULL,
+                agent_name    TEXT,
+                mode          TEXT NOT NULL,
+                input_summary TEXT,
+                analysis_text TEXT NOT NULL,
+                sources       TEXT
+            )
+            """
+        )
+        # Migración: la DB de producción ya existe en un Volume y
+        # CREATE TABLE IF NOT EXISTS no agrega columnas a tablas existentes.
+        try:
+            conn.execute("ALTER TABLE market_analyses ADD COLUMN sources TEXT")
+        except sqlite3.OperationalError:
+            pass  # la columna ya existe
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_usage (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at    TEXT NOT NULL,
+                agent_sub     TEXT NOT NULL,
+                agent_name    TEXT,
+                tool          TEXT NOT NULL,
+                input_tokens  INTEGER,
+                output_tokens INTEGER,
+                web_searches  INTEGER,
+                est_cost_usd  REAL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_created ON api_usage(created_at)")
+
+
+def _record_listing(user, form, photo_count, listing_text):
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO listings (
+                created_at, agent_sub, agent_name, operacion, tipo, edificio, zona,
+                piso, precio, m2, habitaciones, banos, parqueos, amueblado,
+                photo_count, listing_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                user.get("sub", ""), user.get("name", ""),
+                form.operacion, form.tipo, form.edificio, form.zona, form.piso,
+                form.precio, form.m2, form.habitaciones, form.banos, form.parqueos,
+                form.amueblado, photo_count, listing_text,
+            ),
+        )
+
+
+def _record_usage(user, tool, usage_dict):
+    """Registra tokens y costo estimado de una llamada a Anthropic.
+
+    Envuelto COMPLETO en try/except: un fallo de registro jamás debe romper
+    la generación que lo origina.
+    """
+    try:
+        usage_dict = usage_dict if isinstance(usage_dict, dict) else {}
+        input_tokens = int(usage_dict.get("input_tokens") or 0)
+        output_tokens = int(usage_dict.get("output_tokens") or 0)
+        server_tool_use = usage_dict.get("server_tool_use")
+        web_searches = 0
+        if isinstance(server_tool_use, dict):
+            web_searches = int(server_tool_use.get("web_search_requests") or 0)
+        est_cost_usd = (
+            input_tokens / 1e6 * USD_PER_MTOK_INPUT
+            + output_tokens / 1e6 * USD_PER_MTOK_OUTPUT
+            + web_searches / 1000 * USD_PER_1K_WEB_SEARCHES
+        )
+        with _db() as conn:
+            conn.execute(
+                """
+                INSERT INTO api_usage
+                    (created_at, agent_sub, agent_name, tool,
+                     input_tokens, output_tokens, web_searches, est_cost_usd)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    user.get("sub", ""), user.get("name", ""), tool,
+                    input_tokens, output_tokens, web_searches, est_cost_usd,
+                ),
+            )
+    except Exception:
+        pass  # nunca romper la generación por un fallo de registro
+
+
+def _is_admin(sub: str) -> bool:
+    u = _load_users().get(sub or "")
+    return bool(u and u.get("admin"))
+
+
+init_db()
+
+
+@app.get("/api/listings")
+def list_listings(user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    cols = ("id, created_at, agent_sub, agent_name, operacion, tipo, edificio, "
+            "zona, precio, m2, habitaciones, banos, photo_count")
+    with _db() as conn:
+        if _is_admin(sub):
+            rows = conn.execute(
+                f"SELECT {cols} FROM listings ORDER BY id DESC LIMIT 500"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {cols} FROM listings WHERE agent_sub = ? ORDER BY id DESC LIMIT 500",
+                (sub,),
+            ).fetchall()
+    return {"is_admin": _is_admin(sub), "listings": [dict(r) for r in rows]}
+
+
+@app.get("/api/listings/{listing_id}")
+def get_listing(listing_id: int, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Listing no encontrado.")
+    rec = dict(row)
+    if not _is_admin(sub) and rec.get("agent_sub") != sub:
+        raise HTTPException(status_code=404, detail="Listing no encontrado.")
+    return rec
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ── Análisis de Mercado (multi-agente real: Recopilador → Analista) ─────────
+# ══════════════════════════════════════════════════════════════════════════
+
+class ClosingRecord(BaseModel):
+    edificio: Optional[str] = None
+    zona: str
+    tipo: str
+    operacion: str
+    m2: Optional[float] = None
+    precio_cierre: float
+    fecha_cierre: str
+    piso: Optional[str] = None
+    habitaciones: Optional[str] = None
+    banos: Optional[str] = None
+    parqueos: Optional[str] = None
+    finca: Optional[str] = None
+    notas: Optional[str] = None
+
+
+class MarketAnalysisRequest(BaseModel):
+    mode: str  # "captacion" | "comprador" | "inversion"
+    # Mode 1 — captación
+    edificio: Optional[str] = None
+    zona: Optional[str] = None
+    tipo: Optional[str] = None
+    operacion: Optional[str] = None
+    m2: Optional[float] = None
+    habitaciones: Optional[str] = None
+    banos: Optional[str] = None
+    parqueos: Optional[str] = None
+    precio_propuesto: Optional[float] = None
+    # Mode 2 — comprador
+    presupuesto_min: Optional[float] = None
+    presupuesto_max: Optional[float] = None
+    zonas_interes: Optional[str] = None
+    perfil_comprador: Optional[str] = None
+    tipo_propiedad: Optional[str] = None
+    # Mode 3 — inversión
+    zonas_comparar: Optional[str] = None
+    tipo_inversion: Optional[str] = None
+    horizonte: Optional[str] = None
+
+
+DATA_AGGREGATOR_PROMPT = """
+Eres el Agente Recopilador de Datos del sistema de análisis de mercado inmobiliario de RE/MAX Life Panamá.
+
+Tu única función es recopilar, organizar y estructurar datos de mercado. NO produces análisis ni recomendaciones — solo datos limpios y verificados.
+
+TAREA:
+1. Usa web_search para buscar propiedades activas en Encuentra24 y Compreoalquile que coincidan con el perfil solicitado (zona, tipo, operación, rango de características).
+2. Busca al menos 5–8 comparables activos. Para cada uno registra: edificio, zona, piso, m², precio de lista, precio/m², amenidades clave, tiempo estimado en mercado si visible.
+3. Busca también precios de alquiler activos para la zona (útil para calcular yield en cualquier modo).
+4. Consolida esos datos con los CIERRES INTERNOS que recibirás en el mensaje del usuario.
+5. Distingue siempre entre PRECIO DE LISTA (portales) y PRECIO DE CIERRE REAL (datos internos).
+
+OUTPUT — responde ÚNICAMENTE con este bloque estructurado, sin texto adicional antes ni después:
+
+===DATOS_MERCADO===
+COMPARABLES ACTIVOS EN MERCADO:
+[tabla con columnas: Edificio | Zona | M² | Precio Lista | $/m² | Características]
+
+PRECIOS DE ALQUILER ACTIVOS (zona):
+[rango de precios encontrados para el tipo de propiedad]
+
+CIERRES REALES (fuente interna RE/MAX Life):
+[reproduce los datos internos recibidos de forma tabular]
+
+ESTADÍSTICAS CONSOLIDADAS:
+- Precio/m² promedio mercado activo: $X
+- Precio/m² promedio cierres reales: $X
+- Diferencia lista vs cierre: X%
+- Yield estimado de alquiler: X% anual
+- Velocidad de mercado: [estimado basado en volumen de listings]
+- Fuentes consultadas: [lista URLs o portales]
+===FIN_DATOS===
+"""
+
+
+MARKET_ANALYST_PROMPT = """
+Eres el Agente Analista de Mercado de RE/MAX Life Panamá. Eres un experto en el mercado inmobiliario panameño con 15 años de experiencia, especializado en inversionistas extranjeros y compradores de ticket medio-alto.
+
+Recibirás datos de mercado ya recopilados y estructurados. Tu trabajo es producir un análisis accionable basado EXCLUSIVAMENTE en esos datos — no busques información adicional.
+
+PRINCIPIOS DE ANÁLISIS:
+- Sé específico con números. Nunca digas "los precios son competitivos" — di "$X/m² vs promedio de $Y/m² en la zona".
+- Distingue siempre precio de lista vs precio de cierre real. El precio de cierre es la verdad.
+- Calibra el tono al modo: técnico para captación e inversión, claro y vendedor para comprador.
+- Si los datos son insuficientes para una conclusión, dilo explícitamente en lugar de inventar.
+
+MODO CAPTACION — output structure:
+===DATOS_MERCADO===
+[reproduce el resumen estadístico de los datos recibidos]
+
+===ANALISIS===
+POSICIONAMIENTO COMPETITIVO
+[cómo se compara esta propiedad vs los comparables activos]
+
+ANÁLISIS DE PRECIO
+[precio recomendado con justificación numérica basada en comparables y cierres]
+
+VELOCIDAD DE ABSORCIÓN
+[estimado de tiempo en mercado basado en datos disponibles]
+
+===RECOMENDACION===
+PRECIO RECOMENDADO DE CAPTACIÓN: $X
+RANGO DE NEGOCIACIÓN: $X – $X
+ESTRATEGIA: [2–3 oraciones accionables para el agente]
+
+MODO COMPRADOR — output structure:
+===DATOS_MERCADO===
+[resumen de opciones disponibles en el mercado]
+
+===ANALISIS===
+ANÁLISIS POR ZONA
+[comparativa de zonas dentro del presupuesto del comprador]
+
+MEJOR VALOR ACTUAL
+[las 2–3 opciones con mejor relación precio/valor basadas en datos]
+
+PERSPECTIVA DE PLUSVALÍA
+[tendencia basada en historial de cierres internos disponibles]
+
+===RECOMENDACION===
+RECOMENDACIÓN PARA EL CLIENTE:
+Tier 1 — Opción conservadora: [zona/tipo/rango de precio]
+Tier 2 — Opción balanceada: [zona/tipo/rango de precio]
+Tier 3 — Opción con mayor potencial: [zona/tipo/rango de precio]
+
+MODO INVERSION — output structure:
+===DATOS_MERCADO===
+[estadísticas por zona]
+
+===TABLA_COMPARATIVA===
+Zona | Precio/m² promedio | Yield estimado | Tendencia | Liquidez | Rating
+[una fila por zona analizada, con datos numéricos reales]
+
+===ANALISIS===
+ANÁLISIS POR ZONA
+[narrativa por cada zona comparada, con datos específicos]
+
+OPORTUNIDAD VS RIESGO
+[evaluación basada en datos]
+
+===RECOMENDACION===
+VEREDICTO DE INVERSIÓN:
+[recomendación directa con justificación numérica]
+ZONA RECOMENDADA: [nombre]
+RAZÓN PRINCIPAL: [una oración con número]
+"""
+
+
+# Etiquetas en español para _format_request_params (campos de MarketAnalysisRequest)
+_PARAM_LABELS = [
+    ("edificio", "Edificio"),
+    ("zona", "Zona"),
+    ("tipo", "Tipo"),
+    ("operacion", "Operación"),
+    ("m2", "M²"),
+    ("habitaciones", "Habitaciones"),
+    ("banos", "Baños"),
+    ("parqueos", "Parqueos"),
+    ("precio_propuesto", "Precio propuesto"),
+    ("presupuesto_min", "Presupuesto mínimo"),
+    ("presupuesto_max", "Presupuesto máximo"),
+    ("zonas_interes", "Zonas de interés"),
+    ("perfil_comprador", "Perfil del comprador"),
+    ("tipo_propiedad", "Tipo de propiedad"),
+    ("zonas_comparar", "Zonas a comparar"),
+    ("tipo_inversion", "Tipo de inversión"),
+    ("horizonte", "Horizonte"),
+]
+
+
+def _format_request_params(req) -> str:
+    lines = []
+    for field, label in _PARAM_LABELS:
+        value = getattr(req, field, None)
+        if value is None or value == "":
+            continue
+        if isinstance(value, float):
+            value = f"${value:,.0f}" if field in ("precio_propuesto", "presupuesto_min", "presupuesto_max") else f"{value:g}"
+        lines.append(f"{label}: {value}")
+    return "\n".join(lines) if lines else "(sin parámetros adicionales)"
+
+
+def _get_relevant_closings(req) -> str:
+    clauses, params = [], []
+    if getattr(req, "zona", None):
+        clauses.append("zona = ?"); params.append(req.zona)
+    if getattr(req, "edificio", None):
+        clauses.append("edificio = ?"); params.append(req.edificio)
+    if getattr(req, "tipo", None):
+        clauses.append("tipo = ?"); params.append(req.tipo)
+    if getattr(req, "operacion", None):
+        clauses.append("operacion = ?"); params.append(req.operacion)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with _db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM market_closings {where} ORDER BY fecha_cierre DESC LIMIT 20",
+            params,
+        ).fetchall()
+
+    if not rows:
+        return ("CIERRES INTERNOS: Sin registros para esta búsqueda. "
+                "El análisis se basará exclusivamente en datos de mercado público.")
+
+    label = req.zona or req.edificio or getattr(req, "zonas_interes", None) or getattr(req, "zonas_comparar", None) or "varios"
+    out = [f"CIERRES INTERNOS RE/MAX LIFE — {label}", f"Total registros encontrados: {len(rows)}", ""]
+    for r in rows:
+        m2 = r["m2"]
+        ppm2 = f"${r['precio_cierre'] / m2:,.0f}" if m2 else "—"
+        m2_txt = f"{m2:g}m²" if m2 else "—"
+        out.append(
+            f"{r['fecha_cierre']} | {r['edificio'] or '—'} | {r['tipo']} | {r['operacion']} | "
+            f"{m2_txt} | ${r['precio_cierre']:,.0f} | $/m²: {ppm2} | Piso: {r['piso'] or '—'}"
+        )
+
+    precios = [r["precio_cierre"] for r in rows]
+    ppm2s = [r["precio_cierre"] / r["m2"] for r in rows if r["m2"]]
+    fechas = sorted(r["fecha_cierre"] for r in rows)
+    out.append("")
+    out.append("Resumen estadístico:")
+    out.append(f"- Precio promedio de cierre: ${sum(precios) / len(precios):,.0f}")
+    if ppm2s:
+        out.append(f"- Precio/m² promedio: ${sum(ppm2s) / len(ppm2s):,.0f}")
+    out.append(f"- Rango: ${min(precios):,.0f} – ${max(precios):,.0f}")
+    out.append(f"- Período cubierto: {fechas[0]} a {fechas[-1]}")
+    return "\n".join(out)
+
+
+def _record_analysis(sub, agent_name, mode, req, text, sources=None):
+    with _db() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO market_analyses
+                (created_at, agent_sub, agent_name, mode, input_summary, analysis_text, sources)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                sub, agent_name, mode, _format_request_params(req), text,
+                json.dumps(sources or [], ensure_ascii=False),
+            ),
+        )
+        return cur.lastrowid
+
+
+def _extract_web_sources(content_blocks, max_sources=25):
+    """Extrae URLs reales de los bloques web_search_tool_result de la respuesta.
+
+    Cada bloque trae "content" con una lista de items type=="web_search_result"
+    ({"url", "title", ...}). Si la búsqueda falló, "content" puede ser un dict
+    de error — se ignora defensivamente. Dedup por URL preservando orden.
+    """
+    sources, seen = [], set()
+    for block in content_blocks or []:
+        if not isinstance(block, dict) or block.get("type") != "web_search_tool_result":
+            continue
+        results = block.get("content")
+        if not isinstance(results, list):
+            continue  # dict de error u otro formato inesperado
+        for item in results:
+            if not isinstance(item, dict) or item.get("type") != "web_search_result":
+                continue
+            url = item.get("url")
+            if not url or not isinstance(url, str) or url in seen:
+                continue
+            seen.add(url)
+            sources.append({"url": url, "title": item.get("title") or url})
+            if len(sources) >= max_sources:
+                return sources
+    return sources
+
+
+async def _anthropic_messages(system_prompt, user_msg, web_search):
+    """Messages API de Anthropic con reintento ante 429 (rate limit por minuto).
+
+    Devuelve {"text": <texto concatenado>, "sources": [{"url", "title"}, ...]}.
+    Las fuentes solo aparecen cuando web_search=True (bloques web_search_tool_result).
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY no está configurada en el servidor (Railway).")
+
+    tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}] if web_search else []
+    payload = {
+        "model": LISTING_MODEL,
+        "max_tokens": 4000,
+        "system": system_prompt,
+        "tools": tools,
+        "messages": [{"role": "user", "content": user_msg}],
+    }
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    last_detail = ""
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        for attempt in range(3):
+            try:
+                resp = await client.post(ANTHROPIC_MESSAGES_URL, json=payload, headers=headers)
+            except httpx.RequestError as e:
+                raise HTTPException(status_code=502, detail=f"No se pudo contactar a Anthropic: {e}")
+            if resp.status_code == 200:
+                data = resp.json()
+                content_blocks = data.get("content", [])
+                text = "\n".join(
+                    b.get("text", "") for b in content_blocks if b.get("type") == "text"
+                )
+                return {
+                    "text": text,
+                    "sources": _extract_web_sources(content_blocks),
+                    "usage": data.get("usage", {}),
+                }
+            last_detail = resp.text[:300]
+            if resp.status_code == 429 and attempt < 2:
+                try:
+                    wait = float(resp.headers.get("retry-after", "20"))
+                except (TypeError, ValueError):
+                    wait = 20.0
+                await asyncio.sleep(min(max(wait, 5.0), 35.0))
+                continue
+            break
+
+    if resp.status_code == 429 or "rate_limit" in last_detail:
+        raise HTTPException(
+            status_code=429,
+            detail=("Límite de Anthropic alcanzado (tu plan permite 30k tokens/min). "
+                    "Espera ~1 minuto e intenta de nuevo, o sube tu tier en Anthropic."),
+        )
+    raise HTTPException(status_code=resp.status_code, detail=f"Anthropic API error {resp.status_code}: {last_detail}")
+
+
+async def _run_data_aggregator(req, internal_data):
+    # SUB-AGENTE 1 — Recopilador de datos (web_search ACTIVADO).
+    user_msg = f"""
+SOLICITUD DE ANÁLISIS — MODO: {req.mode.upper()}
+
+PARÁMETROS DE BÚSQUEDA:
+{_format_request_params(req)}
+
+{internal_data}
+
+Recopila datos de mercado para este perfil específico en Panamá.
+"""
+    result = await _anthropic_messages(DATA_AGGREGATOR_PROMPT, user_msg, web_search=True)
+    return result["text"], result["sources"], result.get("usage", {})
+
+
+async def _run_market_analyst(req, aggregator_result):
+    # SUB-AGENTE 2 — Analista de mercado (tools=[], sin web_search).
+    user_msg = f"""
+MODO: {req.mode.upper()}
+PARÁMETROS ORIGINALES: {_format_request_params(req)}
+
+DATOS DE MERCADO RECOPILADOS:
+{aggregator_result}
+
+Produce el análisis completo para este caso.
+"""
+    result = await _anthropic_messages(MARKET_ANALYST_PROMPT, user_msg, web_search=False)
+    # sin web_search las fuentes siempre vienen vacías
+    return result["text"], result.get("usage", {})
+
+
+@app.post("/api/closings")
+def create_closing(req: ClosingRecord, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    with _db() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO market_closings (
+                created_at, agent_sub, edificio, zona, tipo, operacion, m2,
+                precio_cierre, fecha_cierre, piso, habitaciones, banos, parqueos, finca, notas
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                sub, req.edificio, req.zona, req.tipo, req.operacion, req.m2,
+                req.precio_cierre, req.fecha_cierre, req.piso, req.habitaciones,
+                req.banos, req.parqueos, req.finca, req.notas,
+            ),
+        )
+        new_id = cur.lastrowid
+    return {"id": new_id, "message": "Cierre registrado"}
+
+
+@app.get("/api/closings")
+def list_closings(zona: Optional[str] = None, edificio: Optional[str] = None,
+                  limit: int = 50, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    clauses, params = [], []
+    if not _is_admin(sub):
+        clauses.append("agent_sub = ?"); params.append(sub)
+    if zona:
+        clauses.append("zona = ?"); params.append(zona)
+    if edificio:
+        clauses.append("edificio = ?"); params.append(edificio)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with _db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM market_closings {where} ORDER BY fecha_cierre DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
+    return {"closings": [dict(r) for r in rows], "total": len(rows)}
+
+
+@app.post("/api/analyze-market")
+async def analyze_market(req: MarketAnalysisRequest, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    agent_name = user.get("name", sub)
+
+    # STEP 1: cierres internos relevantes (DB)
+    internal_data = _get_relevant_closings(req)
+
+    # STEP 2: SUB-AGENTE 1 — Recopilador de Datos (web_search + fuentes reales)
+    aggregator_result, sources, aggregator_usage = await _run_data_aggregator(req, internal_data)
+    _record_usage(user, "acm", aggregator_usage)
+
+    # STEP 3: SUB-AGENTE 2 — Analista de Mercado (sin web_search)
+    analysis_result, analyst_usage = await _run_market_analyst(req, aggregator_result)
+    _record_usage(user, "acm", analyst_usage)
+
+    # STEP 4: persistir y devolver
+    analysis_id = None
+    try:
+        analysis_id = _record_analysis(sub, agent_name, req.mode, req, analysis_result, sources)
+    except Exception:
+        pass  # nunca romper el análisis por un fallo de registro
+    return {
+        "text": analysis_result,
+        "data_context": aggregator_result,
+        "sources": sources,
+        "analysis_id": analysis_id,
+    }
+
+
+# ── Reporte ACM descargable (HTML brandeado) ────────────────────────────────
+
+_REPORT_SECTION_TITLES = {
+    "DATOS_MERCADO": "Datos de Mercado",
+    "ANALISIS": "Análisis",
+    "RECOMENDACION": "Recomendación",
+    "TABLA_COMPARATIVA": "Tabla Comparativa",
+}
+
+_REPORT_MODE_LABELS = {
+    "captacion": "Captación",
+    "comprador": "Comprador",
+    "inversion": "Inversión",
+}
+
+
+def _parse_analysis_sections(text: str):
+    """Divide analysis_text por marcadores ===NOMBRE=== → [(nombre, contenido), ...].
+
+    El texto antes del primer marcador (si existe) se devuelve como ("_INTRO", ...).
+    """
+    sections = []
+    parts = re.split(r"===\s*([A-Z_]+)\s*===", text or "")
+    intro = parts[0].strip()
+    if intro:
+        sections.append(("_INTRO", intro))
+    for i in range(1, len(parts) - 1, 2):
+        name = parts[i].strip()
+        content = parts[i + 1].strip()
+        if name in ("FIN_DATOS",):
+            continue
+        if content:
+            sections.append((name, content))
+    return sections
+
+
+def _report_table_html(content: str) -> str:
+    """Convierte un bloque con líneas separadas por | en una tabla HTML real."""
+    esc = html_escape_mod.escape
+    rows, extra = [], []
+    for line in content.splitlines():
+        if "|" in line:
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if all(re.fullmatch(r"[-—: ]*", c) for c in cells):
+                continue  # línea separadora estilo markdown
+            rows.append(cells)
+        elif line.strip():
+            extra.append(line.strip())
+    if not rows:
+        return f'<pre class="report-pre">{esc(content)}</pre>'
+
+    ncols = max(len(r) for r in rows)
+    header, body = rows[0], rows[1:]
+    thead = "".join(f"<th>{esc(c)}</th>" for c in header + [""] * (ncols - len(header)))
+    tbody = ""
+    for r in body:
+        cells = r + [""] * (ncols - len(r))
+        tbody += "<tr>" + "".join(f"<td>{esc(c)}</td>" for c in cells) + "</tr>"
+    extra_html = ""
+    if extra:
+        extra_html = '<p class="table-note">' + "<br/>".join(esc(l) for l in extra) + "</p>"
+    return (
+        f'<table class="report-table"><thead><tr>{thead}</tr></thead>'
+        f"<tbody>{tbody}</tbody></table>{extra_html}"
+    )
+
+
+_REPORT_MONTHS_ES = [
+    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+]
+
+# CSS del reporte A4 (sistema "Internacional" — ver design-tokens.json del handoff).
+# String normal (no f-string) para no duplicar llaves.
+_REPORT_CSS = """
+*{box-sizing:border-box;margin:0;padding:0}
+@page{size:A4;margin:0}
+html,body{background:#F8F7F5}
+body{font-family:'Archivo','Helvetica Neue',Helvetica,Arial,sans-serif;color:#1C1B19;
+  line-height:1.6;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.num{font-variant-numeric:tabular-nums}
+
+/* Página A4 — 210×297mm (794×1123px @96dpi) */
+.page{width:210mm;min-height:297mm;margin:0 auto;background:#fff;position:relative;
+  display:flex;flex-direction:column;padding:64px 64px 36px;
+  break-after:page;page-break-after:always}
+.page:last-of-type{break-after:auto;page-break-after:auto}
+@media screen{.page{margin:24px auto;outline:1px solid #E5E2DD}}
+@media print{html,body{background:#fff}.page{margin:0;outline:none}}
+
+/* ── Página 1 · Portada ── */
+.cover{background:#131936;color:#fff;height:297mm;overflow:hidden;padding:64px}
+.cover-grid{position:absolute;inset:0;
+  background-image:linear-gradient(rgba(205,199,189,0.05) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(205,199,189,0.05) 1px,transparent 1px);
+  background-size:72px 72px}
+.cover-inner{position:relative;flex:1;display:flex;flex-direction:column}
+.cover-top{display:flex;justify-content:space-between;align-items:center}
+.logo-chip{height:28px;background:#fff;border-radius:4px;padding:7px 11px}
+.cover-tag{font-size:10px;letter-spacing:0.22em;color:#CDC7BD}
+.cover-mid{flex:1;display:flex;flex-direction:column;justify-content:center}
+.cover-rule{width:44px;height:3px;background:#CC0000;margin-bottom:30px}
+.cover-kicker{font-size:13px;font-weight:600;letter-spacing:0.24em;color:#CDC7BD;margin-bottom:20px}
+.cover-title{font-size:52px;font-weight:700;letter-spacing:-0.03em;line-height:1.04;
+  color:#fff;overflow-wrap:break-word}
+.cover-meta{font-size:14px;color:rgba(255,255,255,0.65);margin-top:22px}
+.cover-bottom{display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;
+  border-top:1px solid rgba(205,199,189,0.25);padding-top:24px}
+.cover-cell-label{font-size:9.5px;font-weight:600;letter-spacing:0.18em;
+  color:rgba(205,199,189,0.7);margin-bottom:7px}
+.cover-cell-value{font-size:14px;font-weight:600;color:#fff;overflow-wrap:break-word}
+
+/* ── Header de documento (páginas 2 y 3) ── */
+.doc-header{display:flex;justify-content:space-between;align-items:baseline;gap:16px;
+  border-bottom:2px solid #131936;padding-bottom:14px;margin-bottom:24px}
+.doc-title{font-size:20px;font-weight:700;letter-spacing:-0.02em;color:#131936}
+.doc-kicker{font-size:9.5px;font-weight:600;letter-spacing:0.18em;color:#003DA5;
+  text-transform:uppercase;text-align:right}
+
+/* Banda de parámetros */
+.band{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:#E5E2DD;
+  border:1px solid #E5E2DD;margin-bottom:26px;break-inside:avoid;page-break-inside:avoid}
+.band-cell{background:#fff;padding:14px 16px}
+.band-label{font-size:8.5px;font-weight:600;letter-spacing:0.14em;color:#9B978F;
+  text-transform:uppercase;margin-bottom:7px}
+.band-value{font-size:12.5px;font-weight:600;color:#131936;line-height:1.35;overflow-wrap:break-word}
+
+/* Secciones numeradas — numeral fantasma + regla roja */
+.sec{display:grid;grid-template-columns:84px 1fr;gap:20px;padding:16px 0}
+.sec + .sec{border-top:1px solid #E5E2DD}
+.sec-num{font-size:20px;font-weight:700;color:#D9D5CE;line-height:1}
+.sec-rule{width:20px;height:2px;background:#CC0000;margin-top:8px}
+.sec-title{font-size:13.5px;font-weight:700;color:#131936;margin-bottom:5px}
+.sec-pre,.report-pre{white-space:pre-wrap;overflow-wrap:break-word;font-family:inherit;
+  font-size:11.5px;color:#605D57;line-height:1.65}
+.intro{padding-bottom:16px}
+
+/* Panel navy de recomendación */
+.reco{background:#131936;padding:24px 28px;margin-top:10px;break-inside:avoid;page-break-inside:avoid}
+.reco-label{font-size:8.5px;font-weight:600;letter-spacing:0.18em;color:rgba(255,255,255,0.55);margin-bottom:10px}
+.reco-pre{white-space:pre-wrap;overflow-wrap:break-word;font-family:inherit;
+  font-size:11.5px;color:rgba(255,255,255,0.88);line-height:1.65}
+
+/* Tabla comparativa — cifras tabular-nums a la derecha */
+.report-table{width:100%;border-collapse:collapse;border:1px solid #E5E2DD;
+  margin-bottom:8px;font-variant-numeric:tabular-nums}
+.report-table th{background:#F8F7F5;border-bottom:1px solid #E5E2DD;padding:9px 16px;
+  font-size:8.5px;font-weight:600;letter-spacing:0.14em;color:#9B978F;
+  text-transform:uppercase;text-align:right}
+.report-table th:first-child{text-align:left}
+.report-table td{padding:10px 16px;border-bottom:1px solid #E5E2DD;font-size:11px;
+  color:#1C1B19;text-align:right}
+.report-table td:first-child{text-align:left;font-weight:600;color:#131936}
+.report-table tbody tr:last-child td{border-bottom:none}
+.table-note{font-size:9.5px;color:#9B978F;margin:2px 0 26px;line-height:1.6;
+  font-variant-numeric:tabular-nums}
+
+/* Fuentes numeradas */
+.src-kicker{font-size:9.5px;font-weight:600;letter-spacing:0.18em;color:#003DA5;
+  text-transform:uppercase;margin:18px 0 12px}
+.src-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 28px;margin-bottom:26px}
+.src{display:flex;gap:8px;font-size:10px;color:#605D57;align-items:baseline;min-width:0}
+.src-num{color:#131936;font-weight:700;font-size:9px;flex:none}
+.src a{color:#003DA5;text-decoration:none;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;min-width:0}
+.sources-empty{font-size:10.5px;color:#605D57;font-style:italic;margin-bottom:26px}
+
+/* Aviso legal */
+.disclaimer{background:#F8F7F5;border:1px solid #E5E2DD;padding:14px 18px;
+  font-size:9.5px;color:#605D57;line-height:1.65;margin-bottom:24px}
+.disclaimer strong{color:#131936}
+
+/* Footer con paginación */
+.pg-footer{margin-top:auto;display:flex;justify-content:space-between;align-items:center;
+  font-size:9.5px;letter-spacing:0.12em;color:#9B978F;
+  border-top:1px solid #E5E2DD;padding-top:12px}
+"""
+
+
+def _build_market_report_html(rec: dict) -> str:
+    esc = html_escape_mod.escape
+
+    # Fecha "10 de junio, 2026" (independiente del locale)
+    try:
+        dt = datetime.fromisoformat(rec["created_at"])
+    except Exception:
+        dt = datetime.now()
+    fecha = f"{dt.day} de {_REPORT_MONTHS_ES[dt.month - 1]}, {dt.year}"
+
+    agent_name = rec.get("agent_name") or rec.get("agent_sub") or "—"
+    mode_label = _REPORT_MODE_LABELS.get((rec.get("mode") or "").lower(), rec.get("mode") or "—")
+
+    # Parámetros del análisis (input_summary → pares "Etiqueta: valor")
+    params = []
+    for line in (rec.get("input_summary") or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            k, v = line.split(":", 1)
+            params.append((k.strip(), v.strip()))
+        else:
+            params.append(("", line))
+    pdict = {k.lower(): v for k, v in params if k and v}
+
+    # Título de portada: edificio y/o zona
+    edificio = pdict.get("edificio", "")
+    zona = (pdict.get("zona", "") or pdict.get("zonas de interés", "")
+            or pdict.get("zonas a comparar", ""))
+    title_main = edificio or zona or "Mercado inmobiliario"
+    title_sub = zona if (edificio and zona and zona.lower() != edificio.lower()) else ""
+    cover_title = esc(title_main) + (f"<br>{esc(title_sub)}" if title_sub else "")
+    kicker_doc = f"{title_main} · {zona}" if title_sub else title_main
+
+    # Línea de características de la portada (Apartamento · Venta · 136 m² · …)
+    cover_bits = []
+    for label, value in params:
+        low = label.lower()
+        if not value or low in ("edificio", "zona"):
+            continue
+        if low == "m²":
+            cover_bits.append(f"{value} m²")
+        elif low == "habitaciones":
+            cover_bits.append(f"{value} recámaras")
+        elif low == "baños":
+            cover_bits.append(f"{value} baños")
+        elif low == "parqueos":
+            cover_bits.append(f"{value} parqueos")
+        elif low in ("tipo", "operación", "operacion", "tipo de propiedad",
+                     "tipo de inversión", "tipo de inversion"):
+            cover_bits.append(value)
+    cover_meta_html = (f'<div class="cover-meta num">{esc(" · ".join(cover_bits))}</div>'
+                       if cover_bits else "")
+
+    # Banda de parámetros (página 2) — celdas con hairline, relleno a múltiplo de 4
+    if params:
+        band_cells = "".join(
+            f'<div class="band-cell"><div class="band-label">{esc(k) if k else "&nbsp;"}</div>'
+            f'<div class="band-value num">{esc(v)}</div></div>'
+            for k, v in params
+        )
+        band_cells += '<div class="band-cell"></div>' * ((-len(params)) % 4)
+    else:
+        band_cells = ('<div class="band-cell"><div class="band-value">(sin parámetros '
+                      'adicionales)</div></div>' + '<div class="band-cell"></div>' * 3)
+
+    # Secciones del análisis → página 2 (numeradas + recomendación) y página 3 (tabla)
+    intro_html, numbered_html, reco_html, table_html = "", "", "", ""
+    sec_n = 0
+    for name, content in _parse_analysis_sections(rec.get("analysis_text") or ""):
+        if name == "RECOMENDACION":
+            reco_html = (
+                '<div class="reco"><div class="reco-label">RECOMENDACIÓN</div>'
+                f'<pre class="reco-pre">{esc(content)}</pre></div>'
+            )
+        elif name == "TABLA_COMPARATIVA":
+            table_html = _report_table_html(content)
+        elif name == "_INTRO":
+            intro_html = f'<pre class="report-pre intro">{esc(content)}</pre>'
+        else:
+            sec_n += 1
+            title = _REPORT_SECTION_TITLES.get(name, name.replace("_", " ").title())
+            numbered_html += f"""
+      <div class="sec">
+        <div><div class="sec-num num">{sec_n:02d}</div><div class="sec-rule"></div></div>
+        <div>
+          <div class="sec-title">{esc(title)}</div>
+          <pre class="sec-pre">{esc(content)}</pre>
+        </div>
+      </div>"""
+
+    # Fuentes consultadas (links reales, clicables)
+    try:
+        sources = json.loads(rec.get("sources") or "[]")
+    except (TypeError, ValueError):
+        sources = []
+    if not isinstance(sources, list):
+        sources = []
+    sources = [s for s in sources if isinstance(s, dict) and s.get("url")]
+    if sources:
+        items = ""
+        for i, s in enumerate(sources, 1):
+            url = esc(str(s["url"]), quote=True)
+            label = esc(str(s.get("title") or s["url"]))
+            items += (f'<div class="src"><span class="src-num num">{i:02d}</span>'
+                      f'<a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a></div>')
+        sources_html = f'<div class="src-grid">{items}</div>'
+        sources_kicker = f"FUENTES CONSULTADAS · {len(sources)}"
+    else:
+        sources_html = ('<p class="sources-empty">Análisis basado en datos internos '
+                        "RE/MAX Life y conocimiento de mercado.</p>")
+        sources_kicker = "FUENTES CONSULTADAS"
+
+    page3_title = "Comparables de mercado" if table_html else "Fuentes consultadas"
+    kicker_p3 = f"{zona or title_main} · {_REPORT_MONTHS_ES[dt.month - 1]} {dt.year}"
+    logo_chip = f'<img src="{LOGO_DATA_URI}" class="logo-chip" alt="RE/MAX Life" />'
+
+    def footer(p: int) -> str:
+        return ('<footer class="pg-footer"><span>RE/MAX LIFE · ANÁLISIS COMPARATIVO '
+                f'DE MERCADO</span><span class="num">{p} / 3</span></footer>')
+
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Análisis Comparativo de Mercado — RE/MAX Life</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>{_REPORT_CSS}</style>
+</head>
+<body>
+
+<!-- Página 1 · Portada -->
+<div class="page cover">
+  <div class="cover-grid"></div>
+  <div class="cover-inner">
+    <div class="cover-top">
+      {logo_chip}
+      <span class="cover-tag num">PANAMÁ · {dt.year}</span>
+    </div>
+    <div class="cover-mid">
+      <div class="cover-rule"></div>
+      <div class="cover-kicker">ANÁLISIS COMPARATIVO<br>DE MERCADO</div>
+      <div class="cover-title">{cover_title}</div>
+      {cover_meta_html}
+    </div>
+    <div class="cover-bottom">
+      <div><div class="cover-cell-label">PREPARADO POR</div>
+        <div class="cover-cell-value num">{esc(agent_name)}</div></div>
+      <div><div class="cover-cell-label">FECHA</div>
+        <div class="cover-cell-value num">{esc(fecha)}</div></div>
+      <div><div class="cover-cell-label">MODO DE ANÁLISIS</div>
+        <div class="cover-cell-value num">{esc(mode_label)}</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Página 2 · Resumen ejecutivo + análisis + recomendación -->
+<div class="page">
+  <header class="doc-header">
+    <div class="doc-title">Resumen ejecutivo</div>
+    <div class="doc-kicker">{esc(kicker_doc)}</div>
+  </header>
+  <div class="band">{band_cells}</div>
+  {intro_html}
+  {numbered_html}
+  {reco_html}
+  {footer(2)}
+</div>
+
+<!-- Página 3 · Comparables + fuentes + aviso -->
+<div class="page">
+  <header class="doc-header">
+    <div class="doc-title">{esc(page3_title)}</div>
+    <div class="doc-kicker">{esc(kicker_p3)}</div>
+  </header>
+  {table_html}
+  <div class="src-kicker">{esc(sources_kicker)}</div>
+  {sources_html}
+  <div class="disclaimer"><strong>Aviso.</strong> Este documento es una estimación de mercado
+  elaborada con herramientas de análisis de RE/MAX Life y no constituye un avalúo formal.
+  RE/MAX Life — La primera franquicia RE/MAX en Panamá · Info@remax-life.com.pa · +507 391-9865.</div>
+  {footer(3)}
+</div>
+
+</body>
+</html>"""
+
+
+@app.get("/api/market-report/{analysis_id}")
+def market_report(analysis_id: int, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM market_analyses WHERE id = ?", (analysis_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Análisis no encontrado.")
+    rec = dict(row)
+    if not _is_admin(sub) and rec.get("agent_sub") != sub:
+        raise HTTPException(status_code=404, detail="Análisis no encontrado.")
+
+    doc = _build_market_report_html(rec)
+
+    # Nombre de archivo: zona (del input_summary) o id, + fecha
+    zona = ""
+    for line in (rec.get("input_summary") or "").splitlines():
+        if line.lower().startswith("zona"):
+            zona = line.split(":", 1)[-1].strip()
+            break
+    slug = re.sub(r"[^A-Za-z0-9-]+", "-", zona).strip("-")[:40] or str(rec["id"])
+    try:
+        fecha_file = datetime.fromisoformat(rec["created_at"]).strftime("%Y-%m-%d")
+    except Exception:
+        fecha_file = datetime.now().strftime("%Y-%m-%d")
+    filename = f"ACM_REMAX-Life_{slug}_{fecha_file}.html"
+
+    return StreamingResponse(
+        io.BytesIO(doc.encode("utf-8")),
+        media_type="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Historial de ACMs ────────────────────────────────────────────────────────
+
+@app.get("/api/analyses")
+def list_analyses(user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    cols = "id, created_at, agent_sub, agent_name, mode, input_summary"
+    with _db() as conn:
+        if _is_admin(sub):
+            rows = conn.execute(
+                f"SELECT {cols} FROM market_analyses ORDER BY id DESC LIMIT 500"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {cols} FROM market_analyses WHERE agent_sub = ? ORDER BY id DESC LIMIT 500",
+                (sub,),
+            ).fetchall()
+    return {"is_admin": _is_admin(sub), "analyses": [dict(r) for r in rows]}
+
+
+@app.get("/api/analyses/{analysis_id}")
+def get_analysis(analysis_id: int, user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM market_analyses WHERE id = ?", (analysis_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Análisis no encontrado.")
+    rec = dict(row)
+    if not _is_admin(sub) and rec.get("agent_sub") != sub:
+        raise HTTPException(status_code=404, detail="Análisis no encontrado.")
+    try:
+        sources = json.loads(rec.get("sources") or "[]")
+        rec["sources"] = sources if isinstance(sources, list) else []
+    except (json.JSONDecodeError, TypeError, ValueError):
+        rec["sources"] = []
+    return rec
+
+
+# ── Resumen de gasto en API (solo administradores) ───────────────────────────
+
+@app.get("/api/usage/summary")
+def usage_summary(user=Depends(require_auth)):
+    sub = user.get("sub", "")
+    if not _is_admin(sub):
+        raise HTTPException(status_code=403, detail="Solo administradores.")
+
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    month_start = f"{month}-01"
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT tool,
+                   COUNT(*)                       AS calls,
+                   COALESCE(SUM(input_tokens), 0)  AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(web_searches), 0)  AS web_searches,
+                   COALESCE(SUM(est_cost_usd), 0)  AS est_cost_usd
+            FROM api_usage
+            WHERE created_at >= ?
+            GROUP BY tool
+            """,
+            (month_start,),
+        ).fetchall()
+
+    by_tool = {
+        t: {"est_cost_usd": 0.0, "calls": 0, "input_tokens": 0,
+            "output_tokens": 0, "web_searches": 0}
+        for t in ("acm", "listing")
+    }
+    total_cost = 0.0
+    total_calls = 0
+    for r in rows:
+        by_tool[r["tool"]] = {
+            "est_cost_usd": round(r["est_cost_usd"], 4),
+            "calls": r["calls"],
+            "input_tokens": r["input_tokens"],
+            "output_tokens": r["output_tokens"],
+            "web_searches": r["web_searches"],
+        }
+        total_cost += r["est_cost_usd"]
+        total_calls += r["calls"]
+
+    return {
+        "month": month,
+        "budget_usd": float(os.environ.get("MONTHLY_BUDGET_USD", "20")),
+        "est_cost_usd": round(total_cost, 4),
+        "by_tool": by_tool,
+        "total_calls": total_calls,
+    }

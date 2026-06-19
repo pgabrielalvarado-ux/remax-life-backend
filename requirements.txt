@@ -5,3 +5,5 @@ beautifulsoup4==4.12.3
 pydantic==2.7.1
 python-multipart==0.0.9
 lxml==5.2.2
+PyJWT==2.9.0
+bcrypt==4.2.0

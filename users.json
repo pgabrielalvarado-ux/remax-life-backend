@@ -1,0 +1,94 @@
+{
+  "agents": {
+    "p.alvarado": {
+      "name": "Pedro G. Alvarado",
+      "email": "pedro.alvarado@remax-life.com.pa",
+      "hash": "$2b$12$mPupZsTXrN4ckOPjnXt9HuCTI12ls4u0XnMzNluYlxInTtaSi63am",
+      "admin": true
+    },
+    "g.pichardo": {
+      "name": "Gabriel Pichardo",
+      "email": "gabriel.pichardo@remax-life.com.pa",
+      "hash": "$2b$12$eIbEzII69BqSYuAX5lhi4OSLztHTJ6uYoIlN5HP44B3PhEErd8TU6"
+    },
+    "a.gonzalez": {
+      "name": "Andy Gonzalez",
+      "email": "andy.gonzalez@remax-life.com.pa",
+      "hash": "$2b$12$qWAO.XCcR2ZLpMGYiOEv9eeRWLRUyuuTF.PtnjMa72E2etjl0HtB."
+    },
+    "c.franco": {
+      "name": "Carlos Franco",
+      "email": "carlos.franco@remax-life.com.pa",
+      "hash": "$2b$12$vdV1AsiR6xZKh.jtqQ0P7e.GIeXlkbly0QkqAjaHHADj7JkG5qIB."
+    },
+    "d.mezzalira": {
+      "name": "Daniela Mezzalira",
+      "email": "daniela.mezzalira@remax-life.com.pa",
+      "hash": "$2b$12$CYBwwquYLrihjvbngMEnAOfOLaO1avaTiwd0K0u3foY4rf.pxmKXO"
+    },
+    "g.guardado": {
+      "name": "Gema Guardado",
+      "email": "gema.guardado@remax-life.com.pa",
+      "hash": "$2b$12$qVpszl8jVPysfYPgLNihy.JCU71XqoDIQX3ZB0b05jKUHLGNNsf56"
+    },
+    "h.urroz": {
+      "name": "Humberto Urroz",
+      "email": "humberto.urroz@remax-life.com.pa",
+      "hash": "$2b$12$B3SwRRXzjhLKcghgwJv2bOhEJLbOp5vl7MbM48xBfbRdMpJZ3M3xW"
+    },
+    "j.martinez": {
+      "name": "Jeli Martinez",
+      "email": "jeli.martinez@remax-life.com.pa",
+      "hash": "$2b$12$xwVDx3kaDvr82NO34sABy.vQJw4b048bJVUQJzPfncuWlSkQChCbe"
+    },
+    "k.toledo": {
+      "name": "Karla Toledo",
+      "email": "karla.toledo@remax-life.com.pa",
+      "hash": "$2b$12$MWwacaBXwlQI4/8eiIZkheDCsMkiNJ5of7CbQBWbOG0tPBBn7mlJm"
+    },
+    "p.martinez": {
+      "name": "Paula Martinez",
+      "email": "paula.martinez@remax-life.com.pa",
+      "hash": "$2b$12$unkdozuy82pzPUA7yG1vF.6NqQ3X8g4SZ0zDn6PLNhKNQ6NZ5VNSC"
+    },
+    "r.hanock": {
+      "name": "Ramy Hanock",
+      "email": "ramy.hanock@remax-life.com.pa",
+      "hash": "$2b$12$VOzJhJqETnG0onda53XtDeEznGed4.5Z5rtoEjYodQyq6.MinS3d."
+    },
+    "s.bihkak": {
+      "name": "Salim Bihkak",
+      "email": "salim.bihkak@remax-life.com.pa",
+      "hash": "$2b$12$PIbbB6EtybKub3j/f7m35e7qxsIq2qFw.jdAWapwGG7tUh3bxYWwm"
+    },
+    "s.klenuk": {
+      "name": "Silvana Klenuk",
+      "email": "silvana.klenuk@remax-life.com.pa",
+      "hash": "$2b$12$rHVnJEKcadafaM5pfi0HKu1R3IK9uaFaAiBZlKhiaYKXFF44P/81W"
+    },
+    "y.sanoja": {
+      "name": "Yelena Sanoja",
+      "email": "yelena.sanoja@remax-life.com.pa",
+      "hash": "$2b$12$QXrBVFoShLWEHknCDo3d.O9/Kpp8E8mufadqMVgTxtzJ9FkWW1odW",
+      "admin": false
+    },
+    "y.taylor": {
+      "name": "Yorleny Taylor",
+      "email": "yorleny.taylor@remax-life.com.pa",
+      "hash": "$2b$12$zkeQxmiUOgtI4wpgmvPWy.Zfhlj0yk/iiGt.YMF5gxc.SbaGxacrK",
+      "admin": false
+    },
+    "a.pinate": {
+      "name": "Angela Pinate",
+      "email": "angela.pinate@remax-life.com.pa",
+      "hash": "$2b$12$K9kmiLTK6J.35orrnngxyOx0I4jjtjB2cJGxPv8f.LOEK5rrDdJ3W",
+      "admin": false
+    },
+    "a.bedoya": {
+      "name": "Ariel Bedoya",
+      "email": "ariel.bedoya@remax-life.com.pa",
+      "hash": "$2b$12$mHpzLSK/dT82HZgFNqfQFuByK.ArDFb22DB5Ig7pUNZ6pARzkchAe",
+      "admin": false
+    }
+  }
+}

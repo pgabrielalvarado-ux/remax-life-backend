@@ -6,21 +6,44 @@ y se guarda HASHEADA con bcrypt — nunca en texto plano.
 
 Uso:
     python add_user.py            # interactivo (recomendado)
-    python add_user.py --list     # lista los agentes existentes
+    python add_user.py --list     # lista los agentes existentes (con su email)
     python add_user.py --remove   # elimina un agente
+
+El alta pide el email (con un default nombre.apellido@remax-life.com.pa). Ese
+email es la llave del SSO al módulo de Comisiones (portal Altia).
 
 Tras crear/editar agentes, vuelve a desplegar el backend:
     railway up
 """
 import json
 import os
+import re
 import sys
+import unicodedata
 import getpass
 
 import bcrypt
 
 USERS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
 MIN_LEN = 8
+EMAIL_DOMAIN = "remax-life.com.pa"
+
+
+def _slug(text):
+    """Minúsculas sin acentos ni símbolos (para construir el email)."""
+    norm = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]", "", norm.lower())
+
+
+def derive_email(name):
+    """nombre.apellido@remax-life.com.pa a partir del nombre para mostrar.
+    Usa el primer y el último token (ignora iniciales del medio, p.ej.
+    "Pedro G. Alvarado" -> pedro.alvarado)."""
+    tokens = [s for s in (_slug(p) for p in name.split()) if s]
+    if not tokens:
+        return ""
+    local = tokens[0] if len(tokens) == 1 else f"{tokens[0]}.{tokens[-1]}"
+    return f"{local}@{EMAIL_DOMAIN}"
 
 
 def load():
@@ -48,7 +71,8 @@ def cmd_list():
     print(f"Agentes ({len(agents)}):")
     for username, info in sorted(agents.items()):
         tag = "  [admin]" if info.get("admin") else ""
-        print(f"  - {username}  ({info.get('name', username)}){tag}")
+        email = info.get("email", "⚠ SIN EMAIL")
+        print(f"  - {username}  ({info.get('name', username)})  <{email}>{tag}")
 
 
 def cmd_remove():
@@ -69,6 +93,14 @@ def cmd_add():
         print("Usuario inválido (sin espacios, no vacío).")
         sys.exit(1)
     name = input("Nombre para mostrar: ").strip() or username
+    # El email es la llave que une al agente del Hub con su cuenta de Comisiones
+    # (SSO al portal Altia). Se ofrece un default derivado del nombre.
+    default_email = derive_email(name)
+    prompt = f"Email para SSO/comisiones [{default_email}]: " if default_email else "Email para SSO/comisiones: "
+    email = input(prompt).strip().lower() or default_email
+    if not email:
+        print("El email es obligatorio (lo usa el SSO a Comisiones).")
+        sys.exit(1)
     is_admin = input("¿Es administrador? (ve el historial de TODOS) [s/N]: ").strip().lower() in ("s", "si", "sí", "y", "yes")
     pw1 = getpass.getpass("Contraseña: ")
     pw2 = getpass.getpass("Repite la contraseña: ")
@@ -80,7 +112,7 @@ def cmd_add():
         sys.exit(1)
     h = bcrypt.hashpw(pw1.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     existed = username in data["agents"]
-    data["agents"][username] = {"name": name, "hash": h, "admin": is_admin}
+    data["agents"][username] = {"name": name, "email": email, "hash": h, "admin": is_admin}
     save(data)
     print(f"{'Actualizado' if existed else 'Creado'}: {username} ({name}){' [admin]' if is_admin else ''}")
     print(f"Total agentes: {len(data['agents'])}")

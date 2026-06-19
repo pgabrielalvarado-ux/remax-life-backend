@@ -83,6 +83,12 @@
       "email": "angela.pinate@remax-life.com.pa",
       "hash": "$2b$12$K9kmiLTK6J.35orrnngxyOx0I4jjtjB2cJGxPv8f.LOEK5rrDdJ3W",
       "admin": false
+    },
+    "a.bedoya": {
+      "name": "Ariel Bedoya",
+      "email": "ariel.bedoya@remax-life.com.pa",
+      "hash": "$2b$12$mHpzLSK/dT82HZgFNqfQFuByK.ArDFb22DB5Ig7pUNZ6pARzkchAe",
+      "admin": false
     }
   }
 }
